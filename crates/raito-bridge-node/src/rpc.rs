@@ -1,5 +1,6 @@
 //! HTTP RPC server providing REST endpoints for MMR proof generation and block count queries.
 
+use raito_spv_verify::CompressedSpvProof;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info};
@@ -12,10 +13,10 @@ use axum::{
 };
 use serde::Deserialize;
 use std::str::FromStr;
-use tower_http::trace::TraceLayer;
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
-use raito_spv_client::{fetch::fetch_compressed_proof, proof::CompressedSpvProof};
-use raito_spv_core::{block_mmr::BlockInclusionProof, sparse_roots::SparseRoots};
+use raito_spv_client::fetch::fetch_compressed_proof;
+use raito_spv_mmr::{block_mmr::BlockInclusionProof, sparse_roots::SparseRoots};
 
 use crate::app::AppClient;
 
@@ -34,6 +35,8 @@ pub struct RpcConfig {
     pub bitcoin_rpc_url: String,
     /// Bitcoin RPC user:password (optional)
     pub bitcoin_rpc_userpwd: Option<String>,
+    /// Raito RPC URL, where the /chainstate-proof/recent_proof endpoint is available
+    pub raito_rpc_url: String,
 }
 
 /// HTTP RPC server that provides endpoints for MMR operations
@@ -64,11 +67,14 @@ impl RpcServer {
             .route("/head", get(get_head))
             .route("/roots", get(get_roots))
             .with_state(self.app_client.clone())
+            .layer(CompressionLayer::new())
             .layer(TraceLayer::new_for_http());
 
         let compressed = Router::new()
             .route("/compressed_spv_proof/:tx_id", get(get_compressed_proof))
             .with_state(self.config.clone())
+            .layer(CompressionLayer::new())
+            .layer(CorsLayer::permissive())
             .layer(TraceLayer::new_for_http());
 
         let app = Router::new().merge(inclusion).merge(compressed);
@@ -162,9 +168,6 @@ pub async fn get_head(State(app_client): State<AppClient>) -> Result<Json<u32>, 
 
 /// Get a compressed SPV proof for a transaction in a specific block
 ///
-/// # Arguments
-/// * `tx_id` - The transaction ID to prove
-///
 /// # Returns
 /// * `Json<CompressedSpvProof>` - The compressed SPV proof in JSON format
 /// * `StatusCode::BAD_REQUEST` - If the transaction ID is invalid
@@ -174,15 +177,12 @@ pub async fn get_compressed_proof(
     Path(tx_id): Path<String>,
 ) -> Result<Json<CompressedSpvProof>, StatusCode> {
     let txid = bitcoin::Txid::from_str(&tx_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let raito_rpc_url = format!("http://{}", config.rpc_host);
-
     // Call the fetch_compressed_proof function
     let compressed_proof = fetch_compressed_proof(
         txid,
         config.bitcoin_rpc_url,
         config.bitcoin_rpc_userpwd,
-        raito_rpc_url,
+        config.raito_rpc_url,
         false,
     )
     .await
