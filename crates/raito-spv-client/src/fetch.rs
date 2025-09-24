@@ -3,19 +3,19 @@
 
 use std::{io::Write, path::PathBuf};
 
-use bitcoin::{block::Header as BlockHeader, consensus, MerkleBlock, Transaction, Txid};
+use bitcoin::{consensus, MerkleBlock, Txid};
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
 use bzip2::Compression;
-use cairo_air::CairoProof;
 use raito_bitcoin_client::BitcoinClient;
 use raito_spv_mmr::block_mmr::BlockInclusionProof;
-use serde::{Deserialize, Serialize};
 use std::io::Read;
-use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
 
-use raito_spv_verify::{verify_proof, ChainState, CompressedSpvProof, VerifierConfig};
+use raito_spv_verify::{
+    verify::ChainStateProof, verify_proof, CompressedSpvProof, TransactionInclusionProof,
+    VerifierConfig,
+};
 
 /// CLI arguments for the `fetch` subcommand
 #[derive(Clone, Debug, clap::Args)]
@@ -45,30 +45,6 @@ pub struct FetchArgs {
     /// Development mode
     #[arg(long, default_value = "false")]
     dev: bool,
-}
-
-/// Chain state and its recursive proof produced by the Raito node
-#[derive(Serialize, Deserialize)]
-pub struct ChainStateProof {
-    /// Canonical chain state snapshot
-    #[serde(rename = "chainstate")]
-    pub chain_state: ChainState,
-    /// Recursive STARK proof attesting `chain_state` and block MMR root validity
-    #[serde(rename = "proof")]
-    pub chain_state_proof: CairoProof<Blake2sMerkleHasher>,
-}
-
-/// Bitcoin transaction inclusion data in a specific block
-#[derive(Serialize, Deserialize)]
-pub struct TransactionInclusionProof {
-    /// The full Bitcoin transaction being proven
-    pub transaction: Transaction,
-    /// Encoded PartialMerkleTree containing the Merkle path for the transaction
-    pub transaction_proof: Vec<u8>,
-    /// Header of the block that includes the transaction
-    pub block_header: BlockHeader,
-    /// Height of the block that includes the transaction
-    pub block_height: u32,
 }
 
 /// Run the `fetch` subcommand: build a compressed proof and write it to disk

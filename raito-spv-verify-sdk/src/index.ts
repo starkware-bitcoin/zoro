@@ -3,135 +3,169 @@
  * Provides verification and fetching capabilities for SPV proofs
  */
 
-// Type definitions
-export interface VerifierConfig {
-  min_work: string;
-  bootloader_hash: string;
-  task_program_hash: string;
-  task_output_size: number;
-}
-
-// Environment detection
-const isNode = typeof window === 'undefined' && typeof process !== 'undefined' && process.versions && process.versions.node;
-const isBrowser = typeof window !== 'undefined';
+import * as chainStateProof from './chain-state-proof.js';
+import * as blockProof from './block-proof.js';
+import * as transactionProof from './transaction-proof.js';
+import { ChainStateProofVerificationResult } from './chain-state-proof.js';
+import { createVerifierConfig, VerifierConfig } from './config.js';
+import { importAndInit } from './wasm.js';
+import * as bitcoin from './bitcoin.js';
+import { BlockHeader, Transaction } from './bitcoin.js';
+import { BlockProofVerificationResult } from './block-proof.js';
 
 // Type declarations for different environments
-
 export class RaitoSpvSdk {
-  private wasmModule: any;
+  private wasm: any;
   private raitoRpcUrl: string;
+  private config: string;
+  private chainStateFact: ChainStateProofVerificationResult | undefined;
+  private blockHeaderFacts: Map<number, BlockHeader> = new Map();
 
-  constructor(raitoRpcUrl: string = 'https://api.raito.wtf') {
+  private transactionFacts: Map<string, Transaction> = new Map();
+
+  constructor(
+    raitoRpcUrl: string = 'https://api.raito.wtf',
+    config: VerifierConfig
+  ) {
+    console.log('Initializing RaitoSpvSdk...');
+    console.log(`RPC URL: ${raitoRpcUrl}`);
     this.raitoRpcUrl = raitoRpcUrl;
+    this.config = JSON.stringify(config);
+    console.log('RaitoSpvSdk initialized successfully');
   }
 
-  /**
-   * Initialize the SDK with WASM module
-   */
   async init(): Promise<void> {
-    try {
-      // Load WASM module based on environment
-      if (isNode) {
-        // Node.js environment - use dynamic import for ES modules
-        this.wasmModule = await import('../dist/node/index.js');
-      } else if (isBrowser) {
-        // Browser environment - use web version for direct browser usage
-        this.wasmModule = await import('../dist/web/index.js');
-        const start = this.wasmModule.default ?? this.wasmModule.__wbg_init;
-        if (typeof start !== 'function') {
-          throw new Error('WASM initializer not found on module');
-        }
-        await start();  
-      } else {
-        throw new Error('Unsupported environment: neither Node.js nor browser detected');
-      }
-      await this.wasmModule.init();
-    } catch (error) {
-      throw new Error(`Failed to initialize WASM module: ${error}`);
-    }
+    console.log('Initializing WASM module...');
+    this.wasm = await importAndInit();
+    console.log('WASM module initialized successfully');
   }
 
-  /**
-   * Fetch a complete compressed SPV proof for a transaction as a string
-   */
-  async fetchProof(txid: string): Promise<string> {
-    // Fetch the compressed SPV proof for the given transaction ID as a string.
-    // This makes a GET request to the Raito RPC endpoint and returns the proof as a plain string.
-    try {
-      const url = `${this.raitoRpcUrl}/compressed_spv_proof/${txid}`;
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Accept': 'text/plain',
-        },
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch proof: ${response.status} ${response.statusText}`);
-      }
-      return await response.text() as string;
-    } catch (error) {
-      throw new Error(`Failed to fetch proof: ${error}`);
-    }
-  }
-
-  /**
-   * Fetch the most recent proven block height
-   */
   async fetchRecentProvenHeight(): Promise<number> {
+    console.log('Fetching recent proven block height...');
     try {
-      const url = `${this.raitoRpcUrl}/chainstate-proof/recent_proven_height`;
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-        },
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to fetch recent proven height: ${response.status} ${response.statusText}`);
-      }
-      const data = await response.json() as { block_height: number };
-      return data.block_height;
+      const height = await chainStateProof.fetchRecentProvenHeight(
+        this.raitoRpcUrl
+      );
+      console.log(`Recent proven height: ${height}`);
+      return height;
     } catch (error) {
+      console.error('Failed to fetch recent proven height:', error);
       throw new Error(`Failed to fetch recent proven height: ${error}`);
     }
   }
 
-  /**
-   * Verify a compressed SPV proof
-   */
-  async verifyProof(
-    proof: string,
-    config?: Partial<VerifierConfig>
-  ): Promise<boolean> {
-    if (!this.wasmModule) {
-      throw new Error('SDK not initialized. Call init() first.');
+  async verifyRecentChainState(): Promise<ChainStateProofVerificationResult> {
+    if (this.chainStateFact) {
+      console.log('Using cached chain state verification result');
+      return this.chainStateFact;
     }
 
-    try {
-      const verifierConfig = JSON.stringify(this.createVerifierConfig(config));
-      const result = await this.wasmModule.verify_proof_with_config(proof, verifierConfig);
-      return result;
-    } catch (error) {
-      throw new Error(`Proof verification failed: ${error}`);
-    }
+    console.log('Verifying recent chain state...');
+    const proof = await chainStateProof.fetchProof(this.raitoRpcUrl);
+    this.chainStateFact = await chainStateProof.verifyChainState(
+      this.wasm,
+      proof,
+      this.config
+    );
+    console.log(
+      `Chain state verified - Block height: ${
+        this.chainStateFact.chainState.block_height
+      }, MMR Root: ${this.chainStateFact.mmrRoot.substring(0, 16)}...`
+    );
+    return this.chainStateFact;
   }
 
-  /**
-   * Create verifier configuration with defaults
-   */
-  private createVerifierConfig(config?: Partial<VerifierConfig>): VerifierConfig {
-    return {
-      min_work: config?.min_work || '1813388729421943762059264',
-      bootloader_hash: config?.bootloader_hash || '0x0001837d8b77b6368e0129ce3f65b5d63863cfab93c47865ee5cbe62922ab8f3',
-      task_program_hash: config?.task_program_hash || '0x00f0876bb47895e8c4a6e7043829d7886e3b135e3ef30544fb688ef4e25663ca',
-      task_output_size: config?.task_output_size || 8,
-    };
+  async verifyBlockHeader(
+    blockHeight: number,
+    blockHeader: BlockHeader | undefined = undefined
+  ): Promise<BlockHeader> {
+    if (this.blockHeaderFacts.has(blockHeight)) {
+      console.log(
+        `Using cached block header verification for height ${blockHeight}`
+      );
+      return this.blockHeaderFacts.get(blockHeight)!;
+    }
+
+    console.log(`Verifying block header for height ${blockHeight}...`);
+
+    const { mmrRoot: chainStateMmrRoot, chainState } =
+      await this.verifyRecentChainState();
+
+    const proof = await blockProof.fetchBlockProof(
+      this.raitoRpcUrl,
+      blockHeight,
+      chainState.block_height
+    );
+
+    if (!blockHeader) {
+      console.log(
+        `Fetching block header from Raito bridge RPC for height ${blockHeight}...`
+      );
+      blockHeader = await blockProof.fetchBlockHeader(
+        this.raitoRpcUrl,
+        blockHeight
+      );
+    }
+
+    const blockMmrRoot = await this.wasm.verify_block_header(
+      JSON.stringify(blockHeader),
+      proof
+    );
+
+    if (chainStateMmrRoot !== blockMmrRoot) {
+      console.error(
+        'Mismatched block MMR roots between chain state and block verification'
+      );
+      throw new Error('Mismatched block MMR roots');
+    }
+
+    this.blockHeaderFacts.set(blockHeight, blockHeader);
+    console.log(
+      `Block header verified for height ${blockHeight} - MMR Root: ${blockMmrRoot.substring(
+        0,
+        16
+      )}...`
+    );
+    return blockHeader;
+  }
+
+  async verifyTransaction(txid: string): Promise<Transaction> {
+    if (this.transactionFacts.has(txid)) {
+      console.log(
+        `Using cached transaction verification for ${txid.substring(0, 16)}...`
+      );
+      return this.transactionFacts.get(txid)!;
+    }
+
+    console.log(`Verifying transaction ${txid.substring(0, 16)}...`);
+
+    console.log(`Fetching transaction proof for ${txid.substring(0, 16)}...`);
+    const transactionProofData = await transactionProof.fetchTransactionProof(
+      this.raitoRpcUrl,
+      txid
+    );
+    transactionProof.verifyTransactionProof(this.wasm, transactionProofData);
+
+    const proof = JSON.parse(transactionProofData);
+    const { block_header, block_height, transaction } = proof;
+
+    console.log(
+      `Transaction found in block ${block_height}, verifying block header...`
+    );
+    await this.verifyBlockHeader(block_height, block_header);
+
+    this.transactionFacts.set(txid, transaction);
+    console.log(
+      `Transaction verified successfully: ${txid.substring(0, 16)}...`
+    );
+
+    return transaction;
   }
 }
 
-/**
- * Create a new RaitoSpvSdk instance
- */
-export function createRaitoSpvSdk(raitoRpcUrl?: string): RaitoSpvSdk {
-  return new RaitoSpvSdk(raitoRpcUrl);
+export function createRaitoSpvSdk(
+  raitoRpcUrl?: string,
+  config?: Partial<VerifierConfig>
+): RaitoSpvSdk {
+  return new RaitoSpvSdk(raitoRpcUrl, createVerifierConfig(config));
 }
