@@ -12,9 +12,6 @@
   <a href="https://www.cairo-lang.org/">
     <img alt="Cairo" src="https://img.shields.io/badge/Cairo-000?style=for-the-badge" height=30>
   </a>
-  <a href="https://exploration.starkware.co/">
-    <img src="https://img.shields.io/badge/Exploration Team-000.svg?&style=for-the-badge&logo=data:image/svg+xml;base64,... (same as Raito)" alt="Exploration Team" height="30">
-  </a>
 </div>
 
 ---
