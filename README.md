@@ -25,6 +25,17 @@ Zoro can validate Zcash blocks and produce a cryptographic proof that this execu
 Like [Raito](https://github.com/starkware-bitcoin/raito) does for Bitcoin, Zoro provides the same features but for Zcash.
 > **Note:** Early-stage prototype. Expect rapid iteration.
 
+In general STARKs can be very useful to the Zcash ecosystem.
+
+Another unlock they could provide (assuming a change in the base layer) is unlocking ZK rollups on top of Zcash.
+
+If you want to know more about this, check those resources:
+
+- [Ztarknet proposal on the Zcash community forum - a Starknet L2 for Zcash](https://forum.zcashcommunity.com/t/proposal-ztarknet-a-starknet-l2-for-zcash/)
+- [STARK verification as a Transparent Zcash Extension (TZE), i.e. enabler for a Starknet‑style L2 on Zcash.](https://forum.zcashcommunity.com/t/stark-verification-as-a-transparent-zcash-extension-tze-i-e-enabler-for-a-starknet-style-l2-on-zcash)
+- [Why Cairo / FAQ and concerns / security, blockspace footprint, etc](https://forum.zcashcommunity.com/t/why-cairo-starks-for-ztarknet-and-stark-verify-tze/)
+- Ztarknet POC website: <https://ztarknet.cash>
+
 ---
 
 ## Name Reference
