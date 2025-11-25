@@ -1,37 +1,56 @@
-//! Bitcoin transaction and its components.
+//! Zcash transaction and its components.
 //!
 //! Types are extended with extra information required for validation.
 //! The data is expected to be prepared in advance and passed as program arguments.
 
 use core::fmt::{Display, Error, Formatter};
 use core::hash::{Hash, HashStateExTrait, HashStateTrait};
+use core::integer::i64;
 use core::poseidon::PoseidonTrait;
 use utils::bytearray::{ByteArraySnapHash, ByteArraySnapSerde};
 use utils::hash::Digest;
 
-/// Represents a transaction.
-/// https://learnmeabitcoin.com/technical/transaction/
+/// Represents a Zcash transaction (Sapling/Orchard aware).
 #[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct Transaction {
     /// The version of the transaction.
     pub version: u32,
-    /// Flag which indicates the presence of witness data.
-    /// It combines `marker` and `flag` fields for now but in the future
-    /// we might need to separate them if transaction structure changes.
-    /// Segwit marker and flag do not contribute to TXID (transaction hash),
-    /// but do contribute to wTXID.
-    pub is_segwit: bool,
-    /// The inputs of the transaction.
+    /// Indicates whether the Overwinter serialization rules apply. Optional for compatibility
+    /// with legacy Bitcoin fixtures; defaults to `false` if omitted.
+    pub overwintered: Option<bool>,
+    /// Version group identifier (e.g. 0x892F2085 for Sapling). Optional to keep backward
+    /// compatibility with the current Bitcoin-based fixtures; once the JSON inputs are regenerated
+    /// this will always be `Some`.
+    pub version_group_id: Option<u32>,
+    /// Consensus branch id used by ZIP 243/244 (only meaningful for ZIP225+ transactions).
+    pub consensus_branch_id: Option<u32>,
+    /// Transparent inputs.
     pub inputs: Span<TxIn>,
-    /// The outputs of the transaction.
+    /// Transparent outputs.
     pub outputs: Span<TxOut>,
     /// Block height / time after which this transaction can be mined.
     /// Locktime feature is enabled if at least one input has sequence <= 0xfffffffe.
     pub lock_time: u32,
+    /// The last height at which this transaction is valid.
+    pub expiry_height: Option<u32>,
+    /// Net value entering the Sapling pool (ZIP 209). Positive values mean shielded inputs exceed
+    /// outputs, negative values mean the transaction creates shielded value.
+    pub value_balance_sapling: Option<i64>,
+    /// Net value entering the Orchard pool.
+    pub value_balance_orchard: Option<i64>,
+    /// Optional Sapling bundle if the transaction contains shielded spends/outputs.
+    pub sapling_bundle: Option<SaplingBundle>,
+    /// Optional Orchard bundle for NU5 transactions.
+    pub orchard_bundle: Option<OrchardBundle>,
+    /// Optional Sprout (JoinSplit) bundle for legacy transactions.
+    pub sprout_bundle: Option<SproutBundle>,
+    /// Placeholder for SegWit marker/flag. Zcash transactions never carry witness data, but the
+    /// existing validation and data pipelines still expect this flag. It MUST be `false` for any
+    /// Zcash block.
+    pub is_segwit: bool,
 }
 
-/// Input of a transaction.
-/// https://learnmeabitcoin.com/technical/transaction/input/
+/// Zcash transparent transaction input.
 #[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct TxIn {
     /// The signature script which satisfies the conditions placed in the txo pubkey script
@@ -43,11 +62,9 @@ pub struct TxIn {
     pub sequence: u32,
     /// The reference to the previous output that is being spent by this input.
     pub previous_output: OutPoint,
-    /// The witness data for transactions.
-    /// A list of items (of different size) pushed onto stack before sig script execution.
-    /// Can be empty if this particular input spends a non-segwit output.
-    /// NOTE that this field actually belongs to the transaction, but we store it in the input for
-    /// convenience.
+    /// Placeholder for SegWit-style witness data. Zcash transactions do not carry witness stacks,
+    /// but we keep this field temporarily so that legacy validation code continues to compile
+    /// while we migrate the rest of the pipeline. It MUST be empty for valid Zcash blocks.
     pub witness: Span<ByteArray>,
 }
 
@@ -118,8 +135,7 @@ pub struct OutPoint {
 /// Read more: https://en.bitcoin.it/wiki/Script#Provably_Unspendable/Prunable_Outputs
 #[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct TxOut {
-    /// The value of the output in satoshis.
-    /// Can be in range [0, 21_000_000] BTC (including both ends).
+    /// The value of the output in zatoshis (1e-8 ZEC).
     pub value: u64,
     /// The spending script (aka locking code) for this output.
     pub pk_script: @ByteArray,
@@ -129,11 +145,80 @@ pub struct TxOut {
     pub cached: bool,
 }
 
+/// Sapling shielded bundle data. Mirrors the layout described in
+/// [`SaplingBundle`](https://raw.githubusercontent.com/ZcashFoundation/zcashd/refs/heads/master/src/primitives/transaction.cpp).
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct SaplingBundle {
+    /// Shared anchor for all shielded spends in this bundle.
+    pub anchor: Digest,
+    pub value_balance: i64,
+    pub spends: Span<SaplingSpendDescription>,
+    pub outputs: Span<SaplingOutputDescription>,
+    pub binding_sig: @ByteArray,
+}
+
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct SaplingSpendDescription {
+    pub cv: Digest,
+    pub nullifier: Digest,
+    pub rk: Digest,
+    pub zkproof: @ByteArray,
+    pub spend_auth_sig: @ByteArray,
+}
+
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct SaplingOutputDescription {
+    pub cv: Digest,
+    pub cmu: Digest,
+    pub ephemeral_key: Digest,
+    pub enc_ciphertext: @ByteArray,
+    pub out_ciphertext: @ByteArray,
+    pub zkproof: @ByteArray,
+}
+
+/// Orchard bundle bytes plus minimal metadata (see
+/// [`OrchardBundle`](https://raw.githubusercontent.com/ZcashFoundation/zcashd/refs/heads/master/src/primitives/orchard.h)).
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct OrchardBundle {
+    pub value_balance: i64,
+    /// Canonical serialized bytes as produced by the Orchard Rust crate.
+    pub raw_bytes: @ByteArray,
+}
+
+/// Sprout joinsplit bundle (raw bytes). The host environment is expected to provide fully
+/// serialized joinsplits along with the associated proof data.
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct SproutBundle {
+    pub joinsplits: Span<SproutJoinSplit>,
+    pub pub_key: @ByteArray,
+    pub signature: @ByteArray,
+}
+
+/// Sprout JoinSplit description following the layout of `JSDescription`.
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
+pub struct SproutJoinSplit {
+    pub vpub_old: u64,
+    pub vpub_new: u64,
+    pub anchor: Digest,
+    /// Two nullifiers describing the notes being spent.
+    pub nullifiers: Span<Digest>,
+    /// Two commitments for the newly created notes.
+    pub commitments: Span<Digest>,
+    pub ephemeral_key: Digest,
+    pub random_seed: Digest,
+    /// Two MACs proving spend authorization.
+    pub macs: Span<Digest>,
+    /// Serialized Groth16/BCTV14 proof bytes depending on the branch id.
+    pub proof: @ByteArray,
+    /// Two note ciphertexts, each encoded as a 601-byte blob in `zcashd`.
+    pub ciphertexts: Span<ByteArray>,
+}
+
 /// Custom implementation of the `Hash` trait for `TxOut`, excluding `cached` field.
 impl TxOutHash<S, +HashStateTrait<S>, +Drop<S>> of Hash<TxOut, S> {
     fn update_state(state: S, value: TxOut) -> S {
         let state = state.update(value.value.into());
-        let state = state.update_with(value.pk_script.into());
+        let state = state.update_with(value.pk_script);
         state
     }
 }
@@ -157,12 +242,18 @@ impl TxOutDefault of Default<TxOut> {
 impl TransactionDisplay of Display<Transaction> {
     fn fmt(self: @Transaction, ref f: Formatter) -> Result<(), Error> {
         let str: ByteArray = format!(
-            "Transaction {{ version: {}, is_segwit: {}, inputs: {}, outputs: {}, lock_time: {} }}",
+            "Transaction {{ version: {}, overwintered: {}, version_group_id: {}, branch_id: {}, inputs: {}, outputs: {}, lock_time: {}, expiry_height: {}, sapling_balance: {}, orchard_balance: {}, is_segwit: {} }}",
             *self.version,
-            *self.is_segwit,
+            self.overwintered.unwrap_or(false),
+            self.version_group_id.unwrap_or(0),
+            self.consensus_branch_id.unwrap_or(0),
             (*self.inputs).len(),
             (*self.outputs).len(),
             *self.lock_time,
+            self.expiry_height.unwrap_or(0),
+            self.value_balance_sapling.unwrap_or(0),
+            self.value_balance_orchard.unwrap_or(0),
+            *self.is_segwit,
         );
         f.buffer.append(@str);
         Result::Ok(())
@@ -173,11 +264,10 @@ impl TransactionDisplay of Display<Transaction> {
 impl TxInDisplay of Display<TxIn> {
     fn fmt(self: @TxIn, ref f: Formatter) -> Result<(), Error> {
         let str: ByteArray = format!(
-            "TxIn {{ script: {}, sequence: {}, previous_output: {}, witness: {} }}",
+            "TxIn {{ script: {}, sequence: {}, previous_output: {} }}",
             *self.script,
             *self.sequence,
             *self.previous_output.txid,
-            (*self.witness).len(),
         );
         f.buffer.append(@str);
         Result::Ok(())

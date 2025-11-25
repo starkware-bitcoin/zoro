@@ -130,7 +130,7 @@ fn validate_coinbase_maturity(output_height: u32, block_height: u32) -> Result<(
 /// - It starts with `OP_RETURN`.
 /// - Its size exceeds the maximum allowed script size.
 pub fn is_pubscript_unspendable(pubscript: @ByteArray) -> bool {
-    pubscript[0].into() == OP_RETURN || pubscript.len() > MAX_SCRIPT_SIZE
+    pubscript[0] == OP_RETURN || pubscript.len() > MAX_SCRIPT_SIZE
 }
 
 #[cfg(test)]
@@ -143,12 +143,32 @@ mod tests {
     use crate::types::utxo_set::{TX_OUTPUT_STATUS_UNSPENT, UtxoSet};
     use super::{MAX_SCRIPT_SIZE, is_pubscript_unspendable, validate_transaction};
 
+    fn legacy_tx(
+        version: u32, inputs: Span<TxIn>, outputs: Span<TxOut>, lock_time: u32, is_segwit: bool,
+    ) -> Transaction {
+        Transaction {
+            version,
+            overwintered: Option::None,
+            version_group_id: Option::None,
+            consensus_branch_id: Option::None,
+            inputs,
+            outputs,
+            lock_time,
+            expiry_height: Option::None,
+            value_balance_sapling: Option::None,
+            value_balance_orchard: Option::None,
+            sapling_bundle: Option::None,
+            orchard_bundle: Option::None,
+            sprout_bundle: Option::None,
+            is_segwit,
+        }
+    }
+
     #[test]
     fn test_tx_fee() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(
                         "01091d8d76a82122082246acbb6cc51c839d9012ddaca46048de07ca8eec221518200241cdb85fab4815c6c624d6e932774f3fdf5fa2a1d3a1614951afb83269e1454e2002443047",
@@ -168,7 +188,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 90,
                     pk_script: @from_hex(
@@ -178,8 +198,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -195,11 +216,10 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![].span(),
-            outputs: array![
+        let tx = legacy_tx(
+            1,
+            array![].span(),
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -207,8 +227,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -220,10 +241,9 @@ mod tests {
 
     #[test]
     fn test_empty_output() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xffffffff,
@@ -241,9 +261,10 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![].span(),
-            lock_time: 0,
-        };
+            array![].span(),
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -255,10 +276,9 @@ mod tests {
 
     #[test]
     fn test_absolute_locktime_block_height() {
-        let tx = Transaction {
-            version: 2,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            2,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe, // Absolute locktime
@@ -276,7 +296,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -284,8 +304,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 500000 // Block height locktime
-        };
+            500000, // Block height locktime
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -294,7 +315,7 @@ mod tests {
         // Transaction should be invalid when current block height is less than locktime
         let result = validate_transaction(@tx, 500000, 0, 0, txid, ref utxo_set);
         assert_eq!(
-            result.unwrap_err().into(),
+            result.unwrap_err(),
             "Transaction locktime 500000 is not lesser than current block height 500000",
         );
 
@@ -308,10 +329,9 @@ mod tests {
 
     #[test]
     fn test_absolute_locktime_block_time() {
-        let tx = Transaction {
-            version: 2,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            2,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe, // Not final
@@ -329,7 +349,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -337,8 +357,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 1600000000 // UNIX timestamp locktime
-        };
+            1600000000, // UNIX timestamp locktime
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -347,7 +368,7 @@ mod tests {
         // Transaction should be invalid when current block time is not greater than locktime
         let result = validate_transaction(@tx, 0, 1600000000, 1600000000, txid, ref utxo_set);
         assert_eq!(
-            result.unwrap_err().into(),
+            result.unwrap_err(),
             "Transaction locktime 1600000000 is not lesser than current block time 1600000000",
         );
 
@@ -360,10 +381,9 @@ mod tests {
 
     #[test]
     fn test_blocktime_ignored_when_locktime_disabled() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xffffffff, // Final
@@ -381,7 +401,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -389,8 +409,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 1600000000 // UNIX timestamp locktime
-        };
+            1600000000, // UNIX timestamp locktime
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -409,10 +430,9 @@ mod tests {
 
     #[test]
     fn test_blockheight_ignored_when_locktime_disabled() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xffffffff, // Final
@@ -430,7 +450,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -438,8 +458,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 500000 // Block height locktime
-        };
+            500000, // Block height locktime
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -460,10 +481,9 @@ mod tests {
     fn test_immature_coinbase_transaction() {
         let block_height = 50;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -481,7 +501,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -489,8 +509,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -503,10 +524,9 @@ mod tests {
     fn test_mature_coinbase_transaction() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -524,7 +544,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -532,8 +552,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -547,10 +568,9 @@ mod tests {
     fn test_missed_cached_utxo() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -568,7 +588,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -576,8 +596,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -591,10 +612,9 @@ mod tests {
     fn test_wrongly_cached_utxo() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -612,7 +632,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -620,8 +640,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -638,10 +659,9 @@ mod tests {
     fn test_cached_utxo_spending_attempt() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -659,7 +679,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -667,8 +687,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -685,10 +706,9 @@ mod tests {
     fn test_cached_utxo_duplicates() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -706,7 +726,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -714,8 +734,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -741,10 +762,9 @@ mod tests {
     fn test_cached_utxo_double_spending() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -777,7 +797,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -785,8 +805,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);
@@ -804,10 +825,9 @@ mod tests {
     fn test_noncached_utxo_double_spending() {
         let block_height = 150;
 
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffe,
@@ -840,7 +860,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 50,
                     pk_script: @from_hex("76a914000000000000000000000000000000000000000088ac"),
@@ -848,8 +868,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_words = tx.encode();
         let txid = double_sha256_word_array(tx_words);

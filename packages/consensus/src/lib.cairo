@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod params;
 pub mod types {
     pub mod block;
     pub mod chain_state;
@@ -9,6 +10,7 @@ pub mod validation {
     pub mod block;
     pub mod coinbase;
     pub mod difficulty;
+    pub mod equihash;
     pub mod header;
     pub mod locktime;
 

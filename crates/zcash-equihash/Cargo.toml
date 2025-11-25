@@ -1,0 +1,19 @@
+[package]
+name = "zcash-equihash"
+description = "Equihash PoW verifier ported from librustzcash"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+std = ["document-features", "blake2b_simd/std", "core2/std"]
+solver = []
+
+[dependencies]
+blake2b_simd = { version = "1.0", default-features = false }
+core2 = { version = "0.4", default-features = false }
+document-features = { version = "0.2", optional = true }
+
+[dev-dependencies]
+hex = "0.4"

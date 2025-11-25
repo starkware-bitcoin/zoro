@@ -89,7 +89,7 @@ fn validate_coinbase_sig_script(script: @ByteArray, block_height: u32) -> Result
     }
 
     let result = script[1].into() + script[2].into() * 256_u32 + script[3].into() * 65536_u32;
-    if result != block_height.into() {
+    if result != block_height {
         return Result::Err("Wrong block height");
     }
 
@@ -200,6 +200,27 @@ mod tests {
         validate_coinbase_outputs, validate_coinbase_sig_script, validate_coinbase_witness,
     };
 
+    fn legacy_tx(
+        version: u32, inputs: Span<TxIn>, outputs: Span<TxOut>, lock_time: u32, is_segwit: bool,
+    ) -> Transaction {
+        Transaction {
+            version,
+            overwintered: Option::None,
+            version_group_id: Option::None,
+            consensus_branch_id: Option::None,
+            inputs,
+            outputs,
+            lock_time,
+            expiry_height: Option::None,
+            value_balance_sapling: Option::None,
+            value_balance_orchard: Option::None,
+            sapling_bundle: Option::None,
+            orchard_bundle: Option::None,
+            sprout_bundle: Option::None,
+            is_segwit,
+        }
+    }
+
     #[test]
     fn test_bip30_first_txid_dup() {
         let txid: Digest = FIRST_DUP_TXID.into();
@@ -261,10 +282,9 @@ mod tests {
 
     #[test]
     fn test_validate_coinbase_with_multiple_input() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 4294967295,
@@ -293,12 +313,10 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
-                TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false },
-            ]
-                .span(),
-            lock_time: 0,
-        };
+            array![TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false }].span(),
+            0,
+            false,
+        );
         let total_fees = 5000000000_u64;
         let block_height = 1;
 
@@ -345,10 +363,9 @@ mod tests {
 
     #[test]
     fn test_validate_coinbase_outputs_amount() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 4294967295,
@@ -364,12 +381,10 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
-                TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false },
-            ]
-                .span(),
-            lock_time: 0,
-        };
+            array![TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false }].span(),
+            0,
+            false,
+        );
 
         let total_fees = 0_u64;
         let block_height = 856_563;
@@ -379,10 +394,9 @@ mod tests {
 
     #[test]
     fn test_validate_coinbase() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(
                         "03f3110d04e202bb667c204d41524120506f6f6c207c204d61646520696e2055534120f09f87baf09f87b8207c2028763033313932342976649b3c094f135bf4b83108c14ea85f129c98e20e0000000000ffffffff",
@@ -405,12 +419,10 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
-                TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false },
-            ]
-                .span(),
-            lock_time: 0,
-        };
+            array![TxOut { value: 5000000000_u64, pk_script: @from_hex(""), cached: false }].span(),
+            0,
+            false,
+        );
 
         let total_fees = 5000000000_u64;
         let block_height = 856_563;
@@ -420,10 +432,9 @@ mod tests {
 
     #[test]
     fn test_validate_coinbase_block170() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: false,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex("04ffff001d0102"),
                     sequence: 4294967295,
@@ -439,7 +450,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 5000000000_u64,
                     pk_script: @from_hex(
@@ -449,8 +460,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
         let total_fees = 0_u64;
         let block_height = 170;
 
@@ -617,10 +629,9 @@ mod tests {
 
     #[test]
     fn test_validate_coinbase_with_segwit_tx() {
-        let tx = Transaction {
-            version: 1,
-            is_segwit: true,
-            inputs: array![
+        let tx = legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(
                         "0320a107046f0a385a632f4254432e434f4d2ffabe6d6dbdd0ee86f9a1badfd0aa1b3c9dac8d90840cf973f7b2590d6c9adde1a6e0974a010000000000000001283da9a172020000000000",
@@ -643,7 +654,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 0_u64,
                     pk_script: @from_hex(
@@ -674,8 +685,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            true,
+        );
 
         let total_fees = 0_u64;
         let block_height = 500_000;

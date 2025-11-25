@@ -81,7 +81,7 @@ generate_test() {
   local num_blocks=${3:-1}
   test_file="${data_dir}/${mode}_${test_case}.json"
   if [[ ! -f "$test_file" || $force -eq 1 ]]; then
-    python ../../scripts/data/generate_data.py --fast --mode $mode --height $height --num_blocks $num_blocks --output_file $test_file
+    python3 ../../scripts/data/generate_data.py --mode $mode --height $height --num_blocks $num_blocks --output_file $test_file
   fi
 }
 
@@ -90,12 +90,21 @@ for test_case in "${light_test_cases[@]}"; do
     generate_test "light" $test_case
 done
 
-for test_case in "${full_test_cases[@]}"; do
-    echo -e "\nGenerating test data: full mode, chain state @ $test_case, single block"
-    generate_test "full" $test_case
-done
+if [[ "${GENERATE_FULL:-0}" == "1" ]]; then
+  for test_case in "${full_test_cases[@]}"; do
+      echo -e "\nGenerating test data: full mode, chain state @ $test_case, single block"
+      generate_test "full" $test_case
+  done
+else
+  echo "Skipping full-mode test cases (set GENERATE_FULL=1 to enable)."
+fi
 
-for test_case in "${utreexo_test_cases[@]}"; do
-    echo -e "\nGenerating test data: utreexo mode, chain state @ $test_case, single block"
-    generate_test "utreexo" $test_case
-done
+UTREEXO_DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.utreexo_data"
+if [[ -d "$UTREEXO_DATA_DIR" ]]; then
+  for test_case in "${utreexo_test_cases[@]}"; do
+      echo -e "\nGenerating test data: utreexo mode, chain state @ $test_case, single block"
+      generate_test "utreexo" $test_case
+  done
+else
+  echo "Skipping Utreexo test cases; data directory '.utreexo_data' not found."
+fi

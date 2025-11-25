@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-SCARB=scarb
+SCARB="scarb"
 
 GREEN='\033[0;32m'
 RED='\033[1;31m'
@@ -57,8 +57,9 @@ for test_file in "${test_files[@]}"; do
             num_ignored=$((num_ignored + 1))
         else
             arguments_file="$(dirname "$test_file")/.arguments-$(basename "$test_file")"
-            python ../../scripts/data/format_args.py --input_file ${test_file} > $arguments_file
-            output=$($SCARB --profile release execute --no-build --print-resource-usage --arguments-file $arguments_file)
+            python3 ../../scripts/data/format_args.py --input_file ${test_file} > $arguments_file
+            output=$($SCARB burn --arguments-file $arguments_file --output-file flamegraph.svg --open-in-browser)
+            output=$($SCARB --profile release execute --print-resource-usage --arguments-file $arguments_file)
             # See https://github.com/software-mansion/scarb/pull/2276
             rm -rf ../../target/execute
             steps=$(echo $output | grep -o 'steps: [0-9,]*' | sed 's/steps: //')

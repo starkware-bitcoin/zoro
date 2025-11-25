@@ -173,6 +173,31 @@ mod tests {
     use crate::types::transaction::{OutPoint, Transaction, TxIn, TxOut};
     use super::{Encode, TransactionCodec, encode_compact_size};
 
+    fn legacy_tx(
+        version: u32,
+        inputs: Span<TxIn>,
+        outputs: Span<TxOut>,
+        lock_time: u32,
+        is_segwit: bool,
+    ) -> Transaction {
+        Transaction {
+            version,
+            overwintered: Option::None,
+            version_group_id: Option::None,
+            consensus_branch_id: Option::None,
+            inputs,
+            outputs,
+            lock_time,
+            expiry_height: Option::None,
+            value_balance_sapling: Option::None,
+            value_balance_orchard: Option::None,
+            sapling_bundle: Option::None,
+            orchard_bundle: Option::None,
+            sprout_bundle: Option::None,
+            is_segwit,
+        }
+    }
+
     #[test]
     fn test_encode_compact_size1() {
         let mut bytes = Default::default();
@@ -335,10 +360,9 @@ mod tests {
     #[test]
     fn test_encode_tx1() {
         // Tx 4ff32a7e58200897220ce4615e30e3e414991222d7eda27e693116abea8b8f33
-        let tx = @Transaction {
-            version: 1_u32,
-            is_segwit: false,
-            inputs: array![
+        let tx = @legacy_tx(
+            1_u32,
+            array![
                 TxIn {
                     script: @from_hex(
                         "493046022100838b5bd094d57898d359569af330312e2dd99f8a1db7add92dc1704808625dbf022100978160771ea1e3ffe014e1fa7559f0bb5ffd32f6b63f19225bf3be110c2f2d65014104c273b18442afb2263698a09da205bb7a18f23037f9c285fc789874fe012ac32b40a18f12191a0015f2506b5a395d9845005b90a34a813715e9cc5dbf8024ca18",
@@ -392,7 +416,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 1050000_u64,
                     pk_script: @from_hex("76a914bafe7b8f25824ff18f698d2878d50c6fc43dd1d088ac"),
@@ -405,8 +429,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            false,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());
@@ -420,11 +445,9 @@ mod tests {
     #[test]
     fn test_encode_tx_many_inputs() {
         // Tx 23d5c86600b72cd512aecebd68a7274f611cd96eb9106125f4ef2502f54effa5
-        let tx = @Transaction {
-            version: 1,
-            is_segwit: false,
-            lock_time: 0,
-            inputs: array![
+        let tx = @legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(
                         "493046022100ebbd4f6b412cafa26c6484ec9a16704177964f2570f0867de633cb3f3b48f3520221008211917fee214c506686a7bba3414b9cbbc33769c06ce49f29197ac863c8bee1014104b13bab6066a13e3d672a0b11447659f1986888c9e5cbf9ee6c57283ccf5662c5eeeefc02ad3c38141b6872ab46429f784802892dea1306c909754b3fcb1f1d0c",
@@ -611,7 +634,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 10000000000_u64,
                     pk_script: @from_hex("76a914552362dca64805372f3a1c1bfbe190bd148569a188ac"),
@@ -624,7 +647,9 @@ mod tests {
                 },
             ]
                 .span(),
-        };
+            0,
+            false,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());
@@ -640,11 +665,9 @@ mod tests {
     #[test]
     fn test_encode_tx_many_outputs() {
         // Tx 3e6cc776f588a464c98e8f701cdcde651c7b3620c44c65099fb3d2f4d8ea260e
-        let tx = @Transaction {
-            version: 1,
-            is_segwit: false,
-            lock_time: 0,
-            inputs: array![
+        let tx = @legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(
                         "47304402203c31af8b4ad8e035aac5a7b2bcda81c26a5a2ce791df00bbf207aabceff246410220545e269decc8c777beccda949118028a9fa3a2a5452414ee3ff21068db18fcab0141047a38fd20560d9e258b11bf6d71fec9f049a4786d0374bc858317848ad32970337ab61ae3bd3c0296d7dce49d7ad0fb46ba0f0743960ea3324a57699a997e5ad9",
@@ -670,7 +693,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 100000000_u64,
                     pk_script: @from_hex("76a91406f1b6716309948fa3b07b0a6b66804fdfd6873188ac"),
@@ -733,7 +756,9 @@ mod tests {
                 },
             ]
                 .span(),
-        };
+            0,
+            false,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());
@@ -748,10 +773,9 @@ mod tests {
     #[test]
     fn test_encode_tx_witness1() {
         // Tx 65d8bd45f01bd6209d8695d126ba6bb4f2936501c12b9a1ddc9e38600d35aaa2
-        let tx = @Transaction {
-            version: 2,
-            is_segwit: true,
-            inputs: array![
+        let tx = @legacy_tx(
+            2,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffd,
@@ -777,7 +801,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 102415_u64,
                     pk_script: @from_hex("76a914998db5e1126bc3a5e04109fbf253a7900462410e88ac"),
@@ -790,8 +814,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 679999,
-        };
+            679999,
+            true,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());
@@ -812,11 +837,9 @@ mod tests {
     #[test]
     fn test_encode_tx_witness2() {
         // Tx 7ee8997b455d8231c162277943a9a2d2d98800faa51da79c17eeb5156739a628,
-        let tx = @Transaction {
-            version: 2,
-            is_segwit: true,
-            lock_time: 0,
-            inputs: array![
+        let tx = @legacy_tx(
+            2,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xffffffff,
@@ -865,7 +888,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 326268_u64,
                     pk_script: @from_hex("00148812478461956e68872e7f3e8782d5ecb58b9ec1"),
@@ -878,7 +901,9 @@ mod tests {
                 },
             ]
                 .span(),
-        };
+            0,
+            true,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());
@@ -899,10 +924,9 @@ mod tests {
     fn test_encode_tx_witness3() {
         /// Tx c06aaaa2753dc4e74dd4fe817522dc3c126fd71792dd9acfefdaff11f8ff954d
         /// Data from example https://learnmeabitcoin.com/technical/transaction/wtxid/
-        let tx = @Transaction {
-            version: 1,
-            is_segwit: true,
-            inputs: array![
+        let tx = @legacy_tx(
+            1,
+            array![
                 TxIn {
                     script: @from_hex(""),
                     sequence: 0xfffffffd,
@@ -928,7 +952,7 @@ mod tests {
                 },
             ]
                 .span(),
-            outputs: array![
+            array![
                 TxOut {
                     value: 10926349_u64,
                     pk_script: @from_hex("0014b549d227c9edd758288112fe3573c1f852401668"),
@@ -941,8 +965,9 @@ mod tests {
                 },
             ]
                 .span(),
-            lock_time: 0,
-        };
+            0,
+            true,
+        );
 
         let tx_encoded = tx.encode();
         let wtx_encoded = tx.encode_with_witness(tx_encoded.span());

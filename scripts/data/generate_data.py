@@ -7,24 +7,33 @@ import time
 import logging
 from decimal import Decimal, getcontext
 from pathlib import Path
+from collections import deque
 
 import requests
 
-from generate_timestamp_data import get_timestamp_data
 from generate_utreexo_data import get_utreexo_data
-from generate_utxo_data import get_utxo_set
 
 logger = logging.getLogger(__name__)
 
 getcontext().prec = 16
 
-BITCOIN_RPC = os.getenv("BITCOIN_RPC")
+ZCASH_RPC = os.getenv("ZCASH_RPC") or os.getenv("BITCOIN_RPC")
+ZCASH_RPC_API_KEY = os.getenv("ZCASH_RPC_API_KEY") or os.getenv("BITCOIN_RPC_API_KEY")
 USERPWD = os.getenv("USERPWD")
-DEFAULT_URL = "https://bitcoin-mainnet.public.blastapi.io"
+DEFAULT_URL = os.getenv(
+    "DEFAULT_ZCASH_RPC", "https://zcash-mainnet.gateway.tatum.io"
+)
 
+POW_AVERAGING_WINDOW = 17
+MEDIAN_TIME_WINDOW = 11
+MAX_TIMESTAMP_HISTORY = POW_AVERAGING_WINDOW + MEDIAN_TIME_WINDOW
+POW_LIMIT_BITS = "1d00ffff"
 FAST = False
 RETRIES = 3
 DELAY = 2
+RPC_REQUEST_LIMIT = int(os.getenv("ZCASH_RPC_LIMIT", "3"))
+RPC_REQUEST_WINDOW = int(os.getenv("ZCASH_RPC_WINDOW", "60"))
+REQUEST_LOG = deque()
 
 from mmr import read_block_mmr_roots
 
@@ -37,38 +46,50 @@ def request_rpc(method: str, params: list):
     :param delay: Delay between retries in seconds.
     :return: parsed JSON result as Python object
     """
-    url = BITCOIN_RPC or DEFAULT_URL
+    url = ZCASH_RPC or DEFAULT_URL
     auth = tuple(USERPWD.split(":")) if USERPWD else None
-    headers = {"content-type": "application/json"}
+    headers = {
+        "content-type": "application/json",
+        "accept-encoding": "identity",
+    }
+    if ZCASH_RPC_API_KEY:
+        headers["x-api-key"] = ZCASH_RPC_API_KEY
     payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 0}
 
+    def throttle():
+        if RPC_REQUEST_LIMIT <= 0:
+            return
+        now = time.time()
+        while REQUEST_LOG and now - REQUEST_LOG[0] > RPC_REQUEST_WINDOW:
+            REQUEST_LOG.popleft()
+        if len(REQUEST_LOG) >= RPC_REQUEST_LIMIT:
+            sleep_for = 1
+            time.sleep(max(sleep_for, 0))
+        REQUEST_LOG.append(time.time())
+
+    res = None
     for attempt in range(RETRIES):
         try:
+            throttle()
             res = requests.post(url, auth=auth, headers=headers, json=payload)
-            return res.json()["result"]
+            if res.status_code == 429:
+                raise ConnectionError(res.text)
+            data = res.json()
+            print(f"data: {data}")
+            if "error" in data and data["error"]:
+                raise ConnectionError(data["error"])
+            if "result" not in data:
+                raise ConnectionError(f"Malformed RPC response: {data}")
+            return data["result"]
         except Exception as e:
             if attempt < RETRIES - 1:
                 logger.debug(f"Connection error: {e}, will retry in {DELAY}s")
                 time.sleep(DELAY)  # Wait before retrying
             else:
+                body = res.text if res is not None else "<no response>"
                 raise ConnectionError(
-                    f"Unexpected RPC response after {RETRIES} attempts:\n{res.text}"
+                    f"Unexpected RPC response after {RETRIES} attempts:\n{body}"
                 )
-
-
-def fetch_chain_state_fast(block_height: int):
-    """Fetches chain state at the end of a specific block with given height."""
-    block_hash = request_rpc("getblockhash", [block_height])
-    head = request_rpc("getblockheader", [block_hash])
-
-    data = get_timestamp_data(block_height)
-    head["prev_timestamps"] = [int(t) for t in data["previous_timestamps"]]
-    if block_height < 2016:
-        head["epoch_start_time"] = 1231006505
-    else:
-        head["epoch_start_time"] = int(data["epoch_start_time"])
-
-    return head
 
 
 def fetch_chain_state(block_height: int):
@@ -92,6 +113,26 @@ def fetch_chain_state(block_height: int):
                 "getblockheader", [prev_header["previousblockhash"]]
             )
             prev_timestamps.insert(0, int(prev_header["time"]))
+    timestamp_window = MAX_TIMESTAMP_HISTORY
+    prev_timestamps = [int(head["time"])]
+    pow_history = [bits_to_target(head["bits"])]
+    current_header = head
+    while len(prev_timestamps) < timestamp_window or len(pow_history) < POW_AVERAGING_WINDOW:
+        prev_hash = current_header.get("previousblockhash")
+        if not prev_hash:
+            break
+        current_header = request_rpc("getblockheader", [prev_hash])
+        if len(prev_timestamps) < timestamp_window:
+            prev_timestamps.insert(0, int(current_header["time"]))
+        if len(pow_history) < POW_AVERAGING_WINDOW:
+            pow_history.insert(0, bits_to_target(current_header["bits"]))
+
+    while len(prev_timestamps) < timestamp_window and prev_timestamps:
+        prev_timestamps.insert(0, prev_timestamps[0])
+
+    while len(pow_history) < POW_AVERAGING_WINDOW:
+        pow_history.insert(0, pow_history[0])
+
     head["prev_timestamps"] = prev_timestamps
 
     # In order to init epoch start we need to query block header at epoch start
@@ -100,6 +141,7 @@ def fetch_chain_state(block_height: int):
     else:
         head["epoch_start_time"] = get_epoch_start_time(block_height)
 
+    head["pow_target_history"] = pow_history
     return head
 
 
@@ -118,8 +160,11 @@ def format_chain_state(head: dict):
         "total_work": str(int.from_bytes(bytes.fromhex(head["chainwork"]), "big")),
         "best_block_hash": head["hash"],
         "current_target": str(bits_to_target(head["bits"])),
-        "epoch_start_time": head["epoch_start_time"],
         "prev_timestamps": head["prev_timestamps"],
+        "epoch_start_time": head["epoch_start_time"],
+        "pow_target_history": [
+            str(value) for value in head.get("pow_target_history", [])
+        ],
     }
 
 
@@ -139,15 +184,24 @@ def bits_to_target(bits: str) -> int:
         return mantissa << (8 * (exponent - 3))
 
 
+def bits_int_to_target(bits_int: int) -> int:
+    return bits_to_target(bits_int.to_bytes(4, "big").hex())
+
+
+POW_LIMIT_TARGET = bits_to_target(POW_LIMIT_BITS)
+
+
 def fetch_block(block_hash: str, fast: bool):
     """Downloads block with transactions (and referred UTXOs) from RPC given the block hash."""
     block = request_rpc("getblock", [block_hash, 2])
 
-    previous_outputs = (
-        {(o["txid"], int(o["vout"])): o for o in get_utxo_set(block["height"])}
-        if fast
-        else None
-    )
+    previous_outputs = None
+    if fast:
+        from generate_utxo_data import get_utxo_set
+
+        previous_outputs = {
+            (o["txid"], int(o["vout"])): o for o in get_utxo_set(block["height"])
+        }
 
     block["data"] = {
         tx["txid"]: resolve_transaction(tx, previous_outputs) for tx in block["tx"]
@@ -280,6 +334,13 @@ def format_block(header: dict):
     }
 
 
+def parse_bits(bits_value: str) -> int:
+    bits_value = bits_value.lower()
+    if bits_value.startswith("0x"):
+        bits_value = bits_value[2:]
+    return int(bits_value, 16)
+
+
 def format_header(header: dict):
     """Formats header according to the respective Cairo type.
 
@@ -287,10 +348,34 @@ def format_header(header: dict):
     """
     return {
         "version": header["version"],
+        "final_sapling_root": header.get("finalsaplingroot", "0" * 64),
         "time": header["time"],
-        "bits": int.from_bytes(bytes.fromhex(header["bits"]), "big"),
-        "nonce": header["nonce"],
+        "bits": parse_bits(header["bits"]),
+        "nonce": normalize_hash_string(header.get("nonce", "0" * 64)),
+        "solution": format_solution(header.get("solution", "")),
     }
+
+
+def normalize_hash_string(value: str) -> str:
+    value = value.lower()
+    if value.startswith("0x"):
+        return value[2:]
+    return value
+
+
+def format_solution(solution_hex: str) -> list[int]:
+    solution_hex = solution_hex.lower()
+    if solution_hex.startswith("0x"):
+        solution_hex = solution_hex[2:]
+    if not solution_hex:
+        return []
+    data = bytes.fromhex(solution_hex)
+    if len(data) % 4 != 0:
+        raise ValueError(f"Equihash solution must be multiple of 4 bytes, got {len(data)}")
+    words: list[int] = []
+    for i in range(0, len(data), 4):
+        words.append(int.from_bytes(data[i : i + 4], "little"))
+    return words
 
 
 def next_chain_state(current_state: dict, new_block: dict) -> dict:
@@ -300,13 +385,19 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
     # We need to recalculate the prev_timestamps field given the previous chain state
     # and all the blocks we applied to it
     prev_timestamps = current_state["prev_timestamps"] + [new_block["time"]]
-    next_state["prev_timestamps"] = prev_timestamps[-11:]
+    next_state["prev_timestamps"] = prev_timestamps[-MAX_TIMESTAMP_HISTORY:]
 
     # Update epoch start time
     if new_block["height"] % 2016 == 0:
         next_state["epoch_start_time"] = new_block["time"]
     else:
         next_state["epoch_start_time"] = current_state["epoch_start_time"]
+
+    pow_history = list(current_state.get("pow_target_history", []))
+    if not pow_history:
+        pow_history = [POW_LIMIT_TARGET] * POW_AVERAGING_WINDOW
+    pow_history.append(bits_to_target(new_block["bits"]))
+    next_state["pow_target_history"] = pow_history[-POW_AVERAGING_WINDOW:]
 
     return next_state
 
@@ -316,7 +407,7 @@ def generate_data(
     initial_height: int,
     num_blocks: int,
     fast: bool,
-    mmr_roots: bool = True,  # TODO: remove it
+    mmr_roots: bool = False,  # TODO: remove it
 ):
     """Generates arguments for Raito program in a human readable form and the expected result.
 
@@ -326,19 +417,20 @@ def generate_data(
         "utreexo" — only last block from the batch is included, but it is extended with Utreexo state/proofs
     :param initial_height: The block height of the initial chain state (0 means the state after genesis)
     :param num_blocks: The number of blocks to apply on top of it (has to be at least 1)
-    :param fast: Use data exported from BigQuery rather than Bitcoin node
+    :param fast: Placeholder, kept for backwards compatibility (ignored)
     :return: tuple (arguments, expected output)
     """
 
+    if fast:
+        logger.warning(
+            "Fast mode is not supported for the Zcash data pipeline; falling back to RPC-backed flow."
+        )
+
     logger.debug(
-        f"Fetching initial chain state{' (fast)' if fast else ' '}, blocks: [{initial_height}, {initial_height + num_blocks - 1}]..."
+        f"Fetching initial chain state, blocks: [{initial_height}, {initial_height + num_blocks - 1}]..."
     )
 
-    chain_state = (
-        fetch_chain_state_fast(initial_height)
-        if fast
-        else fetch_chain_state(initial_height)
-    )
+    chain_state = fetch_chain_state(initial_height)
     initial_chain_state = chain_state
 
     next_block_hash = chain_state["nextblockhash"]
@@ -356,7 +448,7 @@ def generate_data(
         if mode == "light":
             block = fetch_block_header(next_block_hash)
         elif mode in ["full", "utreexo"]:
-            block = fetch_block(next_block_hash, fast)
+            block = fetch_block(next_block_hash, False)
 
             # Build UTXO set and mark outputs spent within the same block (span).
             # Also set "cached" flag for the inputs that spend those UTXOs.
@@ -396,12 +488,19 @@ def generate_data(
     block_formatter = (
         format_block if mode == "light" else format_block_with_transactions
     )
+    formatted_blocks = list(map(block_formatter, blocks))
     result = {
         "chain_state": format_chain_state(initial_chain_state),
-        "blocks": list(map(block_formatter, blocks)),
-        "mmr_roots": read_block_mmr_roots(initial_height) if mmr_roots else None,
+        "blocks": formatted_blocks,
+        #"mmr_roots": read_block_mmr_roots(initial_height) if mmr_roots else None,
         "expected": format_chain_state(chain_state),
     }
+
+    if formatted_blocks:
+        first_bits = formatted_blocks[0]["header"]["bits"]
+        last_bits = formatted_blocks[-1]["header"]["bits"]
+        result["chain_state"]["current_target"] = str(bits_int_to_target(first_bits))
+        result["expected"]["current_target"] = str(bits_int_to_target(last_bits))
 
     if mode == "utreexo":
         assert len(blocks) == 1, "Cannot handle more than one block in Utreexo mode"
@@ -422,8 +521,8 @@ def str2bool(value):
 
 
 # Example: generate_data.py --mode 'light' --height 0 --num_blocks 10 --output_file light_0_10.json
-# Example: generate_data.py --mode 'full' --height 0 --num_blocks 10 --output_file full_0_10.json --fast
-# Example: generate_data.py --mode 'utreexo' --height 0 --num_blocks 10 --output_file utreexo_0_10.json --fast
+# Example: generate_data.py --mode 'full' --height 0 --num_blocks 10 --output_file full_0_10.json
+# Example: generate_data.py --mode 'utreexo' --height 0 --num_blocks 10 --output_file utreexo_0_10.json
 if __name__ == "__main__":
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
