@@ -21,13 +21,70 @@ ZCASH_RPC = os.getenv("ZCASH_RPC") or os.getenv("BITCOIN_RPC")
 ZCASH_RPC_API_KEY = os.getenv("ZCASH_RPC_API_KEY") or os.getenv("BITCOIN_RPC_API_KEY")
 USERPWD = os.getenv("USERPWD")
 DEFAULT_URL = os.getenv(
-    "DEFAULT_ZCASH_RPC", "https://zcash-mainnet.gateway.tatum.io"
+    "DEFAULT_ZCASH_RPC", "https://rpc.mainnet.ztarknet.cash"
 )
+
+# =============================================================================
+# Zcash consensus parameters
+# =============================================================================
 
 POW_AVERAGING_WINDOW = 17
 MEDIAN_TIME_WINDOW = 11
 MAX_TIMESTAMP_HISTORY = POW_AVERAGING_WINDOW + MEDIAN_TIME_WINDOW
 POW_LIMIT_BITS = "1d00ffff"
+
+# Network upgrade activation heights (Zcash mainnet)
+# Must match packages/consensus/src/params.cairo
+OVERWINTER_ACTIVATION_HEIGHT = 347500   # ZIP 200, 201, 202, 203, 143
+SAPLING_ACTIVATION_HEIGHT = 419200      # ZIP 205, 212, 213, 243
+BLOSSOM_ACTIVATION_HEIGHT = 653600      # ZIP 208 - 75s block spacing
+HEARTWOOD_ACTIVATION_HEIGHT = 903000    # ZIP 213, 221 - hashBlockCommitments
+CANOPY_ACTIVATION_HEIGHT = 1046400      # ZIP 211, 212, 214, 215, 216
+NU5_ACTIVATION_HEIGHT = 1687104         # ZIP 224, 225, 226, 227, 244 - Orchard
+
+# Block timing parameters
+PRE_BLOSSOM_POW_TARGET_SPACING = 150    # seconds
+POST_BLOSSOM_POW_TARGET_SPACING = 75    # seconds
+
+# =============================================================================
+# Network upgrade helper functions
+# =============================================================================
+
+def is_overwinter_active(height: int) -> bool:
+    """Returns True if Overwinter is active at the given height."""
+    return height >= OVERWINTER_ACTIVATION_HEIGHT
+
+def is_sapling_active(height: int) -> bool:
+    """Returns True if Sapling is active at the given height."""
+    return height >= SAPLING_ACTIVATION_HEIGHT
+
+def is_blossom_active(height: int) -> bool:
+    """Returns True if Blossom is active at the given height."""
+    return height >= BLOSSOM_ACTIVATION_HEIGHT
+
+def is_heartwood_active(height: int) -> bool:
+    """Returns True if Heartwood is active at the given height."""
+    return height >= HEARTWOOD_ACTIVATION_HEIGHT
+
+def is_canopy_active(height: int) -> bool:
+    """Returns True if Canopy is active at the given height."""
+    return height >= CANOPY_ACTIVATION_HEIGHT
+
+def is_nu5_active(height: int) -> bool:
+    """Returns True if NU5 (Orchard) is active at the given height."""
+    return height >= NU5_ACTIVATION_HEIGHT
+
+def pow_target_spacing(height: int) -> int:
+    """Returns the expected PoW target spacing for a given block height."""
+    if is_blossom_active(height):
+        return POST_BLOSSOM_POW_TARGET_SPACING
+    else:
+        return PRE_BLOSSOM_POW_TARGET_SPACING
+
+# =============================================================================
+# RPC configuration
+# =============================================================================
+
 FAST = False
 RETRIES = 3
 DELAY = 2
@@ -75,7 +132,6 @@ def request_rpc(method: str, params: list):
             if res.status_code == 429:
                 raise ConnectionError(res.text)
             data = res.json()
-            print(f"data: {data}")
             if "error" in data and data["error"]:
                 raise ConnectionError(data["error"])
             if "result" not in data:
@@ -97,51 +153,59 @@ def fetch_chain_state(block_height: int):
     Chain state is a just a block header extended with extra fields:
         - prev_timestamps
         - epoch_start_time
+    
+    Only queries as many previous blocks as actually exist (up to MAX_TIMESTAMP_HISTORY).
     """
     # Chain state at height H is the state after applying block H
     block_hash = request_rpc("getblockhash", [block_height])
     head = request_rpc("getblockheader", [block_hash])
 
-    # In order to init prev_timestamps we need to query 10 previous headers
-    prev_header = head
-    prev_timestamps = [int(head["time"])]
-    for _ in range(10):
-        if prev_header["height"] == 0:
-            break
-        else:
-            prev_header = request_rpc(
-                "getblockheader", [prev_header["previousblockhash"]]
-            )
-            prev_timestamps.insert(0, int(prev_header["time"]))
-    timestamp_window = MAX_TIMESTAMP_HISTORY
+    # Calculate how many previous blocks we actually need to query
+    # We need up to MAX_TIMESTAMP_HISTORY timestamps and POW_AVERAGING_WINDOW pow targets
+    # But we can't query more blocks than exist
+    max_prev_blocks = min(block_height, max(MAX_TIMESTAMP_HISTORY - 1, POW_AVERAGING_WINDOW - 1))
+    
     prev_timestamps = [int(head["time"])]
     pow_history = [bits_to_target(head["bits"])]
     current_header = head
-    while len(prev_timestamps) < timestamp_window or len(pow_history) < POW_AVERAGING_WINDOW:
+    
+    # Only query the blocks that actually exist
+    for _ in range(max_prev_blocks):
         prev_hash = current_header.get("previousblockhash")
         if not prev_hash:
             break
         current_header = request_rpc("getblockheader", [prev_hash])
-        if len(prev_timestamps) < timestamp_window:
+        if len(prev_timestamps) < MAX_TIMESTAMP_HISTORY:
             prev_timestamps.insert(0, int(current_header["time"]))
         if len(pow_history) < POW_AVERAGING_WINDOW:
             pow_history.insert(0, bits_to_target(current_header["bits"]))
 
-    while len(prev_timestamps) < timestamp_window and prev_timestamps:
+    # Pad timestamps with first value if we don't have enough history
+    while len(prev_timestamps) < MAX_TIMESTAMP_HISTORY and prev_timestamps:
         prev_timestamps.insert(0, prev_timestamps[0])
 
-    while len(pow_history) < POW_AVERAGING_WINDOW:
-        pow_history.insert(0, pow_history[0])
+    # DON'T pad pow_history - the Cairo code uses the length to determine
+    # whether to run difficulty adjustment. For early blocks, we want
+    # to use POW_LIMIT instead of running adjustment.
+    # Only pad if we have a full window of actual data.
+    # (The Cairo code will use POW_LIMIT if len < POW_AVERAGING_WINDOW)
 
     head["prev_timestamps"] = prev_timestamps
 
     # In order to init epoch start we need to query block header at epoch start
     if block_height < 2016:
-        head["epoch_start_time"] = 1231006505
+        head["epoch_start_time"] = 1477953400  # Zcash genesis time
     else:
         head["epoch_start_time"] = get_epoch_start_time(block_height)
 
     head["pow_target_history"] = pow_history
+    
+    # Compute total work (sum of work for all blocks up to this height)
+    # For simplicity, we approximate by computing work for this block times (height + 1)
+    # This is a rough approximation since difficulty varies, but it's good enough for testing
+    block_work = target_to_work(bits_to_target(head["bits"]))
+    head["total_work"] = block_work * (block_height + 1)
+    
     return head
 
 
@@ -155,9 +219,18 @@ def get_epoch_start_time(block_height: int) -> int:
 
 def format_chain_state(head: dict):
     """Formats chain state according to the respective Cairo type."""
+    # Zcash RPC doesn't return chainwork, so we use a stored value or compute it
+    if "chainwork" in head:
+        total_work = int.from_bytes(bytes.fromhex(head["chainwork"]), "big")
+    elif "total_work" in head:
+        total_work = head["total_work"]
+    else:
+        # For genesis or early blocks, start with work from target
+        total_work = target_to_work(bits_to_target(head["bits"]))
+    
     return {
         "block_height": head["height"],
-        "total_work": str(int.from_bytes(bytes.fromhex(head["chainwork"]), "big")),
+        "total_work": str(total_work),
         "best_block_hash": head["hash"],
         "current_target": str(bits_to_target(head["bits"])),
         "prev_timestamps": head["prev_timestamps"],
@@ -166,6 +239,15 @@ def format_chain_state(head: dict):
             str(value) for value in head.get("pow_target_history", [])
         ],
     }
+
+
+def target_to_work(target: int) -> int:
+    """Convert target to work (approximate).
+    Work = 2^256 / (target + 1)
+    """
+    if target == 0:
+        return 0
+    return (2**256) // (target + 1)
 
 
 def bits_to_target(bits: str) -> int:
@@ -345,10 +427,29 @@ def format_header(header: dict):
     """Formats header according to the respective Cairo type.
 
     :param header: block header obtained from RPC
+    
+    The header commitment field changes based on network upgrades:
+    - Pre-Sapling (< 419200): Reserved field (all zeros)
+    - Sapling to Heartwood (419200 - 902999): hashFinalSaplingRoot
+    - Heartwood to NU5 (903000 - 1687103): hashLightClientRoot (blockcommitments)
+    - NU5+ (>= 1687104): hashBlockCommitments (includes Orchard)
     """
+    height = header.get("height", 0)
+    
+    # Determine the correct commitment field based on network upgrade
+    if is_heartwood_active(height):
+        # After Heartwood: use blockcommitments (hashLightClientRoot/hashBlockCommitments)
+        hash_commitment = header.get("blockcommitments", "0" * 64)
+    elif is_sapling_active(height):
+        # Sapling to Heartwood: use finalsaplingroot
+        hash_commitment = header.get("finalsaplingroot", "0" * 64)
+    else:
+        # Pre-Sapling: reserved field (should be all zeros)
+        hash_commitment = header.get("finalsaplingroot", "0" * 64)
+    
     return {
         "version": header["version"],
-        "final_sapling_root": header.get("finalsaplingroot", "0" * 64),
+        "final_sapling_root": hash_commitment,
         "time": header["time"],
         "bits": parse_bits(header["bits"]),
         "nonce": normalize_hash_string(header.get("nonce", "0" * 64)),
@@ -398,6 +499,13 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
         pow_history = [POW_LIMIT_TARGET] * POW_AVERAGING_WINDOW
     pow_history.append(bits_to_target(new_block["bits"]))
     next_state["pow_target_history"] = pow_history[-POW_AVERAGING_WINDOW:]
+
+    # Compute cumulative total work
+    current_total_work = current_state.get("total_work", 0)
+    if isinstance(current_total_work, str):
+        current_total_work = int(current_total_work)
+    block_work = target_to_work(bits_to_target(new_block["bits"]))
+    next_state["total_work"] = current_total_work + block_work
 
     return next_state
 

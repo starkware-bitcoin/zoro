@@ -188,7 +188,6 @@ fn split_bytes_into_words(bytes: &[u8]) -> Vec<u32> {
         .map(|chunk| u32::from_be_bytes(chunk.try_into().unwrap()))
         .collect()
 }
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -227,3 +226,4 @@ mod tests {
         assert_eq!(res, expected);
     }
 }
+
