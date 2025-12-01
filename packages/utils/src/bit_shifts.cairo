@@ -1,7 +1,6 @@
 //! Bit shifts and pow helpers.
 
-use core::num::traits::{One, Zero};
-use crate::WrappingMul;
+use core::num::traits::{One, WrappingMul, Zero};
 
 pub fn pow32(n: u32) -> u64 {
     if n == 0 {

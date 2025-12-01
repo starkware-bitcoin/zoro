@@ -11,8 +11,6 @@ from collections import deque
 
 import requests
 
-from generate_utreexo_data import get_utreexo_data
-
 logger = logging.getLogger(__name__)
 
 getcontext().prec = 16
@@ -91,8 +89,6 @@ DELAY = 2
 RPC_REQUEST_LIMIT = int(os.getenv("ZCASH_RPC_LIMIT", "3"))
 RPC_REQUEST_WINDOW = int(os.getenv("ZCASH_RPC_WINDOW", "60"))
 REQUEST_LOG = deque()
-
-from mmr import read_block_mmr_roots
 
 
 def request_rpc(method: str, params: list):
@@ -273,20 +269,11 @@ def bits_int_to_target(bits_int: int) -> int:
 POW_LIMIT_TARGET = bits_to_target(POW_LIMIT_BITS)
 
 
-def fetch_block(block_hash: str, fast: bool):
+def fetch_block(block_hash: str):
     """Downloads block with transactions (and referred UTXOs) from RPC given the block hash."""
     block = request_rpc("getblock", [block_hash, 2])
-
-    previous_outputs = None
-    if fast:
-        from generate_utxo_data import get_utxo_set
-
-        previous_outputs = {
-            (o["txid"], int(o["vout"])): o for o in get_utxo_set(block["height"])
-        }
-
     block["data"] = {
-        tx["txid"]: resolve_transaction(tx, previous_outputs) for tx in block["tx"]
+        tx["txid"]: resolve_transaction(tx, None) for tx in block["tx"]
     }
     return block
 
@@ -511,18 +498,12 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
 
 
 def generate_data(
-    mode: str,
     initial_height: int,
     num_blocks: int,
     fast: bool,
-    mmr_roots: bool = False,  # TODO: remove it
 ):
-    """Generates arguments for Raito program in a human readable form and the expected result.
+    """Generates arguments for Zoro program in a human readable form and the expected result.
 
-    :param mode: Validation mode:
-        "light" — generate block headers with Merkle root only
-        "full" — generate full blocks with transactions (and referenced UTXOs)
-        "utreexo" — only last block from the batch is included, but it is extended with Utreexo state/proofs
     :param initial_height: The block height of the initial chain state (0 means the state after genesis)
     :param num_blocks: The number of blocks to apply on top of it (has to be at least 1)
     :param fast: Placeholder, kept for backwards compatibility (ignored)
@@ -550,41 +531,9 @@ def generate_data(
 
         logger.debug(f"Fetching block {initial_height + i + 1} {i + 1}/{num_blocks}...")
 
-        # Interblock cache
-        tmp_utxo_set = {}
-
-        if mode == "light":
-            block = fetch_block_header(next_block_hash)
-        elif mode in ["full", "utreexo"]:
-            block = fetch_block(next_block_hash, False)
-
-            # Build UTXO set and mark outputs spent within the same block (span).
-            # Also set "cached" flag for the inputs that spend those UTXOs.
-            for txid, tx in block["data"].items():
-                for tx_input in tx["inputs"]:
-                    outpoint = (
-                        tx_input["previous_output"]["txid"],
-                        tx_input["previous_output"]["vout"],
-                    )
-                    if outpoint in tmp_utxo_set:
-                        tx_input["previous_output"]["data"]["cached"] = True
-                        tmp_utxo_set[outpoint]["cached"] = True
-
-                for idx, output in enumerate(tx["outputs"]):
-                    outpoint = (txid, idx)
-                    tmp_utxo_set[outpoint] = output
-
-            # Do another pass to mark UTXOs spent within the same block (span) with "cached" flag.
-            for txid, tx in block["data"].items():
-                for idx, output in enumerate(tx["outputs"]):
-                    outpoint = (txid, idx)
-                    if outpoint in tmp_utxo_set and tmp_utxo_set[outpoint]["cached"]:
-                        tx["outputs"][idx]["cached"] = True
-
-        else:
-            raise NotImplementedError(mode)
-
+        block = fetch_block_header(next_block_hash)
         blocks.append(block)
+
         chain_state = next_chain_state(chain_state, block)
 
         logger.info(f"block: {block}")
@@ -593,14 +542,10 @@ def generate_data(
 
         logger.info(f"Fetched block {initial_height + i + 1} {i + 1}/{num_blocks}")
 
-    block_formatter = (
-        format_block if mode == "light" else format_block_with_transactions
-    )
-    formatted_blocks = list(map(block_formatter, blocks))
+    formatted_blocks = list(map(format_block, blocks))
     result = {
         "chain_state": format_chain_state(initial_chain_state),
         "blocks": formatted_blocks,
-        #"mmr_roots": read_block_mmr_roots(initial_height) if mmr_roots else None,
         "expected": format_chain_state(chain_state),
     }
 
@@ -609,10 +554,6 @@ def generate_data(
         last_bits = formatted_blocks[-1]["header"]["bits"]
         result["chain_state"]["current_target"] = str(bits_int_to_target(first_bits))
         result["expected"]["current_target"] = str(bits_int_to_target(last_bits))
-
-    if mode == "utreexo":
-        assert len(blocks) == 1, "Cannot handle more than one block in Utreexo mode"
-        result["utreexo"] = get_utreexo_data(blocks[0]["height"])
 
     return result
 
@@ -628,9 +569,7 @@ def str2bool(value):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
-# Example: generate_data.py --mode 'light' --height 0 --num_blocks 10 --output_file light_0_10.json
-# Example: generate_data.py --mode 'full' --height 0 --num_blocks 10 --output_file full_0_10.json
-# Example: generate_data.py --mode 'utreexo' --height 0 --num_blocks 10 --output_file utreexo_0_10.json
+# Example: generate_data.py --height 0 --num_blocks 10 --output_file light_0_10.json
 if __name__ == "__main__":
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
@@ -644,13 +583,6 @@ if __name__ == "__main__":
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     parser = argparse.ArgumentParser(description="Process UTXO files.")
-    parser.add_argument(
-        "--mode",
-        dest="mode",
-        default="full",
-        choices=["light", "full", "utreexo"],
-        help="Mode",
-    )
 
     parser.add_argument(
         "--height",
@@ -677,7 +609,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data = generate_data(
-        mode=args.mode,
         initial_height=args.height,
         num_blocks=args.num_blocks,
         fast=args.fast,

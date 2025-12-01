@@ -91,32 +91,43 @@ pub fn validate_timestamp(median_time_past: u32, block_time: u32) -> Result<(), 
     if block_time > median_time_past {
         Result::Ok(())
     } else {
-        Result::Err(format!(
-            "block timestamp {} must be greater than median time past {}",
-            block_time, median_time_past,
-        ))
+        Result::Err(
+            format!(
+                "block timestamp {} must be greater than median time past {}",
+                block_time,
+                median_time_past,
+            ),
+        )
     }
 }
 
 /// Ensures the block time is not excessively ahead of the previous MTP or the local clock.
 pub fn validate_future_timestamp(
-    prev_mtp: u32, block_time: u32, current_time: u32
+    prev_mtp: u32, block_time: u32, current_time: u32,
 ) -> Result<(), ByteArray> {
     let block_time_64: u64 = block_time.into();
     let mtp_limit: u64 = prev_mtp.into() + MAX_FUTURE_BLOCK_TIME_MTP.into();
     if block_time_64 > mtp_limit {
-        return Result::Err(format!(
-            "block timestamp {} exceeds median time past {} plus {} seconds",
-            block_time, prev_mtp, MAX_FUTURE_BLOCK_TIME_MTP,
-        ));
+        return Result::Err(
+            format!(
+                "block timestamp {} exceeds median time past {} plus {} seconds",
+                block_time,
+                prev_mtp,
+                MAX_FUTURE_BLOCK_TIME_MTP,
+            ),
+        );
     }
 
     let local_limit: u64 = current_time.into() + MAX_FUTURE_BLOCK_TIME_LOCAL.into();
     if block_time_64 > local_limit {
-        return Result::Err(format!(
-            "block timestamp {} is more than {} seconds ahead of local time {}",
-            block_time, MAX_FUTURE_BLOCK_TIME_LOCAL, current_time,
-        ));
+        return Result::Err(
+            format!(
+                "block timestamp {} is more than {} seconds ahead of local time {}",
+                block_time,
+                MAX_FUTURE_BLOCK_TIME_LOCAL,
+                current_time,
+            ),
+        );
     }
 
     Result::Ok(())
@@ -136,11 +147,11 @@ pub fn next_prev_timestamps(prev_timestamps: Span<u32>, block_time: u32) -> Span
 
 #[cfg(test)]
 mod tests {
+    use consensus::params::{MAX_FUTURE_BLOCK_TIME_LOCAL, MAX_FUTURE_BLOCK_TIME_MTP};
     use super::{
         compute_median_time_past, median_time_past_at_offset, next_prev_timestamps,
         validate_future_timestamp, validate_timestamp,
     };
-    use consensus::params::{MAX_FUTURE_BLOCK_TIME_LOCAL, MAX_FUTURE_BLOCK_TIME_MTP};
 
     #[test]
     fn test_compute_median_time_past() {
@@ -178,7 +189,7 @@ mod tests {
         // Within both limits.
         assert!(
             validate_future_timestamp(1_u32, 10_u32, 20_u32).is_ok(),
-            "timestamp should be accepted"
+            "timestamp should be accepted",
         );
 
         // Exceeds MTP-based limit.
@@ -186,8 +197,9 @@ mod tests {
         assert!(err.is_err(), "expected MTP bound violation");
 
         // Exceeds local-time limit.
-        let err =
-            validate_future_timestamp(100_u32, 100 + MAX_FUTURE_BLOCK_TIME_LOCAL + 1, 100_u32);
+        let err = validate_future_timestamp(
+            100_u32, 100 + MAX_FUTURE_BLOCK_TIME_LOCAL + 1, 100_u32,
+        );
         assert!(err.is_err(), "expected local time bound violation");
     }
 

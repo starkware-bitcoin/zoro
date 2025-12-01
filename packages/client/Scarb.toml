@@ -3,16 +3,12 @@ name = "client"
 version = "0.1.0"
 edition = "2024_07"
 
-[cairo]
-enable-gas = false
-
 [executable]
 allow-syscalls = true
 
 [dependencies]
 cairo_execute = "2.11.4"
 consensus = { path = "../consensus" }
-utreexo = { path = "../utreexo" }
 
 [dev-dependencies]
 cairo_test.workspace = true
@@ -20,11 +16,7 @@ cairo_test.workspace = true
 [scripts]
 test = "scarb --profile release build && ../../scripts/data/integration_tests.sh"
 regenerate_tests = "../../scripts/data/regenerate_tests.sh"
-client = "scarb build && ../../scripts/data/client.sh"
-lint = "black ../../scripts/data && flake8 ../../scripts/data --max-complexity=10 --max-line-length=88 && scarb fmt"
-
 
 [features]
 default = ["syscalls"]
-shinigami = ["consensus/shinigami"]
 syscalls = ["consensus/syscalls"]

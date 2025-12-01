@@ -1,23 +1,6 @@
-# Bitcoin client in Cairo
+# Zcash client in Cairo
 
-This package is a standalone Cairo program (outside of Starknet context) that implements a Bitcoin client which can work in several modes:
-- Light mode: block header validation only
-- Full mode: full Bitcoin consensus validation
-- Utreexo node: full consensus validation + UTXO set checks
-
-## Usage
-
-```sh
-# You have to be in the "packages/client" directory
-scarb run client START_HEIGHT END_HEIGHT BATCH_SIZE MODE STRATEGY
-```
-
-Client expects the following arguments:
-* `START_HEIGHT` height of the initial chain state
-* `END_HEIGHT` height of the final (resulting) chain state
-* `BATCH_SIZE` number of blocks applied per single program run
-* `MODE` either `light` or `full` or `utreexo` (default is `light`)
-* `STRATEGY` either `sequential` or `random` (default is `sequential`)
+This package is a standalone Cairo program (outside of Starknet context) that implements a Zcash client which validates block headers.
 
 ## Integration tests
 

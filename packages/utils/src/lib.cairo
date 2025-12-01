@@ -14,8 +14,3 @@ pub mod hex;
 
 #[cfg(not(feature: "syscalls"))]
 pub mod sha256;
-
-
-pub use blake2b::blake2b_hash;
-use core::num::traits::{DivRem, WrappingMul};
-

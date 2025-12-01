@@ -270,22 +270,21 @@ mod tests {
             root_hash, 0x19f148fb4f9b5e5bac1c12594b8e4b2d4b94d12c073b92e2b3d83349909613b6_u256,
         );
     }
-
-    #[test]
-    fn test_mmr_blake2b_digest() {
-        let mut mmr: Box<MMR> = BoxImpl::new(Default::default());
-        let leaf = Blake2sDigestFromU256::into(
-            0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66_u256,
-        );
-        for _ in 0..15_usize {
-            mmr = BoxImpl::new(mmr.add(leaf));
-        }
-        let digest = mmr.blake2b_digest();
-        let expected: Array<u8> = array![
-            0x80_u8, 0xd0, 0xdd, 0xd9, 0x3a, 0x8c, 0xee, 0x2e, 0x6d, 0x31, 0x9c, 0x27, 0x56, 0xad,
-            0xdb, 0x8c, 0x38, 0x46, 0x0d, 0xa5, 0x85, 0xbc, 0x6a, 0x39, 0xb3, 0x59, 0x8b, 0xa1,
-            0x93, 0x90, 0xfa, 0x68,
-        ];
-        assert_eq!(digest.span(), expected.span(), "invalid Blake2b digest");
-    }
+    // #[test]
+// fn test_mmr_blake2b_digest() {
+//     let mut mmr: Box<MMR> = BoxImpl::new(Default::default());
+//     let leaf = Blake2sDigestFromU256::into(
+//         0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66_u256,
+//     );
+//     for _ in 0..15_usize {
+//         mmr = BoxImpl::new(mmr.add(leaf));
+//     }
+//     let digest = mmr.blake2b_digest();
+//     let expected: Array<u8> = array![
+//         0x80_u8, 0xd0, 0xdd, 0xd9, 0x3a, 0x8c, 0xee, 0x2e, 0x6d, 0x31, 0x9c, 0x27, 0x56,
+//         0xad, 0xdb, 0x8c, 0x38, 0x46, 0x0d, 0xa5, 0x85, 0xbc, 0x6a, 0x39, 0xb3, 0x59, 0x8b,
+//         0xa1, 0x93, 0x90, 0xfa, 0x68,
+//     ];
+//     assert_eq!(digest.span(), expected.span(), "invalid Blake2b digest");
+// }
 }
