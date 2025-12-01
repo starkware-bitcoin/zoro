@@ -1,16 +1,18 @@
-//! Bitcoin block and its components.
+//! Zcash block header and block data helpers.
 //!
-//! The data is expected to be prepared in advance and passed as program arguments.
+//! The data is expected to be prepared in advance and passed as program arguments. We only keep the
+//! fields that cannot be derived from the execution context (e.g. previous block hash belongs to
+//! the chain state, while the merkle root can be recomputed from the transaction list).
 
 use core::fmt::{Display, Error, Formatter};
+use core::traits::DivRem;
 use utils::blake2s_hasher::{Blake2sDigest, Blake2sHasher};
 use utils::double_sha256::double_sha256_word_array;
 use utils::hash::Digest;
 use utils::word_array::{WordArray, WordArrayTrait};
-use super::transaction::Transaction;
 
 /// Represents a block in the blockchain.
-#[derive(Drop, Copy, Debug, PartialEq, Default, Serde)]
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct Block {
     /// Block header.
     pub header: Header,
@@ -24,13 +26,10 @@ pub enum TransactionData {
     /// Merkle root of all transactions in the block.
     /// This variant is used for header-only validation mode (light client).
     MerkleRoot: Digest,
-    /// List of all transactions included in the block.
-    /// This variant is used for the full consensus validation mode.
-    Transactions: Span<Transaction>,
 }
 
 /// Represents a block header.
-/// https://learnmeabitcoin.com/technical/block/
+/// https://zips.z.cash/protocol/protocol.pdf
 ///
 /// NOTE that some of the fields are missing, that's intended.
 /// The point of the client is to calculate next chain state from the previous
@@ -39,34 +38,42 @@ pub enum TransactionData {
 /// In order to do the calculation we just need data about the block that is strictly necessary,
 /// but not the data we can calculate like merkle root or data that we already have
 /// like previous_block_hash (in the previous chain state).
-#[derive(Drop, Copy, Debug, PartialEq, Default, Serde)]
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct Header {
     /// The version of the block.
     pub version: u32,
+    /// Hash of the Sapling (or reserved pre-Sapling) commitment tree.
+    pub final_sapling_root: Digest,
     /// The timestamp of the block.
     pub time: u32,
     /// The difficulty target for mining the block.
     /// Not strictly necessary since it can be computed from target,
     /// but it is cheaper to validate than compute.
     pub bits: u32,
-    /// The nonce used in mining the block.
-    pub nonce: u32,
+    /// The 256-bit nonce used by Equihash.
+    pub nonce: Digest,
+    /// Equihash solution words (200,9 -> 1344 bytes when full).
+    pub solution: Span<u32>,
+}
+
+impl HeaderDefault of Default<Header> {
+    fn default() -> Header {
+        Header {
+            version: 0,
+            final_sapling_root: Default::default(),
+            time: 0,
+            bits: 0,
+            nonce: Default::default(),
+            solution: array![].span(),
+        }
+    }
 }
 
 #[generate_trait]
 pub impl BlockHashImpl of BlockHash {
     /// Computes the hash of the block header given the missing fields.
     fn hash(self: @Header, prev_block_hash: Digest, merkle_root: Digest) -> Digest {
-        let mut words: WordArray = Default::default();
-
-        words.append_u32_le(*self.version);
-        words.append_span(prev_block_hash.value.span());
-        words.append_span(merkle_root.value.span());
-
-        words.append_u32_le(*self.time);
-        words.append_u32_le(*self.bits);
-        words.append_u32_le(*self.nonce);
-
+        let words = build_header_word_array(self, prev_block_hash, merkle_root);
         double_sha256_word_array(words)
     }
 
@@ -74,33 +81,41 @@ pub impl BlockHashImpl of BlockHash {
     fn blake2s_digest(
         self: @Header, prev_block_hash: Digest, merkle_root: Digest,
     ) -> Blake2sDigest {
+        let words = build_header_word_array(self, prev_block_hash, merkle_root);
+        let (full_words, last_word, last_bytes) = words.into_components();
         let mut hasher = Blake2sHasher::new();
-        let [v1, v2, v3, v4, v5, v6, v7, v8] = prev_block_hash.value;
-        let [v9, v10, v11, v12, v13, v14, v15, v16] = merkle_root.value;
-        hasher
-            .compress_block(
-                [*self.version, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15],
-            );
-        hasher
-            .finalize_block(
-                [v16, *self.time, *self.bits, *self.nonce, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 16,
-            )
+
+        let mut words_span = full_words.span();
+        while let Option::Some(chunk) = words_span.multi_pop_front::<16>() {
+            hasher.compress_block((*chunk).unbox());
+        }
+
+        let mut block_words: Array<u32> = array![];
+        for word in words_span {
+            block_words.append(*word);
+        }
+
+        if last_bytes != 0 {
+            block_words.append(last_word);
+        }
+
+        if block_words.len() == 16 {
+            let mut span = block_words.span();
+            let chunk = span.multi_pop_front::<16>().expect('Missing final Blake2s block');
+            hasher.compress_block((*chunk).unbox());
+            block_words = array![];
+        }
+
+        hasher.finalize(block_words.span())
     }
 }
 
-/// `Default` trait implementation of `TransactionData`, i.e., empty transaction data.
-pub impl TransactionDataDefault of Default<TransactionData> {
-    fn default() -> TransactionData {
-        TransactionData::Transactions(array![].span())
-    }
-}
 
 /// `Display` trait implementation for `Block`.
 impl BlockDisplay of Display<Block> {
     fn fmt(self: @Block, ref f: Formatter) -> Result<(), Error> {
         let data = match *self.data {
             TransactionData::MerkleRoot(root) => format!("{}", root),
-            TransactionData::Transactions(txs) => format!("{}", txs.len()),
         };
         let str: ByteArray = format!(" Block {{ header: {}, data: {} }}", *self.header, @data);
         f.buffer.append(@str);
@@ -111,12 +126,22 @@ impl BlockDisplay of Display<Block> {
 /// `Display` trait implementation for `Header`.
 impl HeaderDisplay of Display<Header> {
     fn fmt(self: @Header, ref f: Formatter) -> Result<(), Error> {
+        let [n0, n1, n2, n3, n4, n5, n6, n7] = (*self.nonce.value);
         let str: ByteArray = format!(
-            "Header {{ version: {}, time: {}, bits: {}, nonce: {}}}",
+            "Header {{ version: {}, time: {}, bits: {}, nonce: [{}, {}, {}, {}, {}, {}, {}, {}], solution_words: {}, final_sapling_root: {} }}",
             *self.version,
             *self.time,
             *self.bits,
-            *self.nonce,
+            n0,
+            n1,
+            n2,
+            n3,
+            n4,
+            n5,
+            n6,
+            n7,
+            self.solution.len(),
+            *self.final_sapling_root,
         );
         f.buffer.append(@str);
         Result::Ok(())
@@ -128,9 +153,6 @@ impl TransactionDataDisplay of Display<TransactionData> {
     fn fmt(self: @TransactionData, ref f: Formatter) -> Result<(), Error> {
         match *self {
             TransactionData::MerkleRoot(root) => f.buffer.append(@format!("MerkleRoot: {}", root)),
-            TransactionData::Transactions(txs) => f
-                .buffer
-                .append(@format!("Transactions: {}", txs.len())),
         }
         Result::Ok(())
     }
@@ -138,97 +160,158 @@ impl TransactionDataDisplay of Display<TransactionData> {
 
 #[cfg(test)]
 mod tests {
+    use consensus::params::{GENESIS_BITS, GENESIS_BLOCK_HASH, GENESIS_MERKLE_ROOT, GENESIS_TIME};
     use utils::blake2s_hasher::Blake2sDigestIntoU256;
     use utils::hash::Digest;
-    use crate::types::chain_state::ChainState;
     use super::{BlockHash, Header};
 
     #[test]
-    fn test_block_hash() {
-        let mut chain_state: ChainState = Default::default();
-        chain_state
-            .best_block_hash =
-                0x000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55_u256
-            .into();
-        // Block 170
-        let header = Header {
-            version: 1_u32, time: 1231731025_u32, bits: 0x1d00ffff_u32, nonce: 1889418792_u32,
-        };
-        let merkle_root: Digest =
-            0x7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff_u256
-            .into();
-
-        let block_hash_result: Digest = header.hash(chain_state.best_block_hash, merkle_root);
-
-        //0x00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee
-        let expected_block_hash: Digest =
-            0x00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee_u256
-            .into();
-
-        assert_eq!(expected_block_hash, block_hash_result);
+    fn test_genesis_block_hash_matches_chainparams() {
+        let header = genesis_header();
+        let prev_block_hash: Digest = 0_u256.into();
+        let merkle_root: Digest = GENESIS_MERKLE_ROOT.into();
+        let block_hash_result: Digest = header.hash(prev_block_hash, merkle_root);
+        assert_eq!(GENESIS_BLOCK_HASH.into(), block_hash_result);
     }
 
     #[test]
-    fn test_merkle_root_diff() {
-        let mut chain_state: ChainState = Default::default();
-        chain_state
-            .best_block_hash =
-                0x000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55_u256
-            .into();
-        // Block 170
-        let header = Header {
-            version: 1_u32, time: 1231731025_u32, bits: 0x1d00ffff_u32, nonce: 1889418792_u32,
-        };
-        let merkle_root: Digest =
-            0x6dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff_u256
-            .into();
+    fn test_merkle_root_changes_hash() {
+        let header = genesis_header();
+        let prev_block_hash: Digest = 0_u256.into();
+        let merkle_root: Digest = (GENESIS_MERKLE_ROOT + 1_u256).into();
 
-        let block_hash_result: Digest = header.hash(chain_state.best_block_hash, merkle_root);
+        let block_hash_result: Digest = header.hash(prev_block_hash, merkle_root);
 
-        let expected_block_hash: Digest =
-            0x00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee_u256
-            .into();
-
-        assert_ne!(expected_block_hash, block_hash_result);
+        assert_ne!(GENESIS_BLOCK_HASH.into(), block_hash_result);
     }
 
     #[test]
-    fn test_best_block_hash_diff() {
-        let mut chain_state: ChainState = Default::default();
-        chain_state
-            .best_block_hash =
-                0x000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd56_u256
-            .into();
-        // block 170
-        let header = Header {
-            version: 1_u32, time: 1231731025_u32, bits: 0x1d00ffff_u32, nonce: 1889418792_u32,
-        };
-        let merkle_root: Digest =
-            0x7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff_u256
-            .into();
-
-        let block_hash_result: Digest = header.hash(chain_state.best_block_hash, merkle_root);
-
-        let expected_block_hash: Digest =
-            0x00000000d1145790a8694403d4063f323d499e655c83426834d4ce2f8dd4a2ee_u256
-            .into();
-
-        assert_ne!(expected_block_hash, block_hash_result);
+    fn test_prev_block_hash_changes_hash() {
+        let header = genesis_header();
+        let prev_block_hash: Digest = 1_u256.into();
+        let merkle_root: Digest = GENESIS_MERKLE_ROOT.into();
+        let block_hash_result: Digest = header.hash(prev_block_hash, merkle_root);
+        assert_ne!(GENESIS_BLOCK_HASH.into(), block_hash_result);
     }
 
     #[test]
-    fn test_block_hash_blake2s() {
-        let header = Header {
-            version: 1_u32, time: 1231731025_u32, bits: 0x1d00ffff_u32, nonce: 1889418792_u32,
-        };
-        let merkle_root = 0x7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff_u256
+    fn test_blake2s_digest_depends_on_header() {
+        let header = genesis_header();
+        let prev_block_hash: Digest = 0_u256.into();
+        let merkle_root: Digest = GENESIS_MERKLE_ROOT.into();
+        let digest: u256 = header.blake2s_digest(prev_block_hash, merkle_root).into();
+        let flipped_header = Header { version: 5, ..header };
+        let flipped_digest: u256 = flipped_header
+            .blake2s_digest(prev_block_hash, merkle_root)
             .into();
-        let best_block_hash =
-            0x000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55_u256
-            .into();
-        let block_hash_result: u256 = header.blake2s_digest(best_block_hash, merkle_root).into();
-        let expected_block_hash =
-            0x50b005dd2964720fcd066875bc1cf13a06703a5c8efe8b02a1fd7ea902050f09_u256;
-        assert_eq!(expected_block_hash, block_hash_result);
+        assert_ne!(digest, flipped_digest);
+    }
+
+    fn genesis_header() -> Header {
+        Header {
+            version: 4_u32,
+            final_sapling_root: Default::default(),
+            time: GENESIS_TIME,
+            bits: GENESIS_BITS,
+            nonce: GENESIS_NONCE.into(),
+            solution: genesis_solution_words(),
+        }
+    }
+
+    fn genesis_solution_words() -> Span<u32> {
+        array![
+            0x9f880a00, 0x864b8500, 0x5f55cd65, 0x81f65646, 0xca1cd379, 0x7f1f1bdc, 0x262795b0,
+            0x94163b31, 0x2848a31d, 0xd4ad674d, 0xd4216168, 0x1630d9e3, 0xd848130c, 0xf1251c19,
+            0x6a7a262b, 0x501b139c, 0xaff8cb31, 0xd5c9791f, 0x216a0713, 0xd07ec86e, 0x6e96fa45,
+            0xd84e2101, 0xc12da03c, 0xa4707279, 0x320d7254, 0x937dac06, 0x0c680a1a, 0x90095e5c,
+            0x70255957, 0x60df9bca, 0x58393458, 0xfc0119b3, 0x4f5aa1e1, 0x7734fd38, 0x142e9150,
+            0xdf734c00, 0x03b988e5, 0x6631c0b6, 0xf3ea2e58, 0x40b12905, 0x07b3a772, 0x46683a9e,
+            0x02b3b901, 0x1f205440, 0xeeb04074, 0x12a7b19e, 0x713ff40f, 0x4a493537, 0x8b1f7ba2,
+            0xf3d760ab, 0x4fa1bc98, 0xdb2abb6a, 0x09049bf2, 0x8a432191, 0x78b07479, 0xb53516a1,
+            0x0f17e994, 0x0b148610, 0x2d827341, 0x448997d6, 0xb4c6e183, 0xd5dcb8e8, 0x49ca12cb,
+            0xe161bc03, 0x4d1d8708, 0x93905a91, 0xb0c98ac1, 0xce16672b, 0x2cca1310, 0x19e37411,
+            0x2170a5c1, 0x5fabc95b, 0x5f766475, 0x2405e27b, 0x8adf3fdc, 0x94fd56a3, 0x5ae045d4,
+            0x8bad65b1, 0x09dba0b4, 0x1876096c, 0xf99810c8, 0x19c74314, 0x83396d41, 0x85def67a,
+            0x0dca5d01, 0xb16294e8, 0x586738d8, 0x998acfb2, 0xb35309e0, 0xe42a0308, 0x5ee0354c,
+            0x924218b7, 0x9797b62e, 0xb51388f6, 0x6c26af9c, 0x5613c2b6, 0x0528e39a, 0x7e1a4205,
+            0xfd370a3a, 0x35eae2f8, 0x2842c54f, 0x94536516, 0xac4b45a9, 0x98922a54, 0x11e276f1,
+            0xde630d02, 0x402c85e6, 0x7e2602de, 0xe1d5c92f, 0x30d92aff, 0x2af00695, 0x50a0711a,
+            0xd3d0161b, 0xfdcd706f, 0x1681e78d, 0xee06c5c0, 0xdedf8d0b, 0xadac61b5, 0xb54617f3,
+            0xc232dda9, 0x43883019, 0x8216fb97, 0x65b54c16, 0x89e014cc, 0xa33566d6, 0xebf71826,
+            0x0805fe05, 0xae3f8a2b, 0x66710562, 0x88896b0a, 0xde53ac6e, 0xcbd709c1, 0xa60c93b6,
+            0xf368a198, 0xbe50a901, 0xbea12d15, 0x51079e2b, 0x0be29569, 0xcbbeeeac, 0xcdd77955,
+            0x9fd016bc, 0x3ccb503a, 0x3fe3ff7d, 0x4f6d6826, 0x6e94f8f3, 0x985e47e6, 0xf93c7bcf,
+            0x66692b06, 0x65f838e8, 0xfbe53dff, 0xa2374a06, 0x8dbba71d, 0xa20125fd, 0x204f189e,
+            0x36baaa7c, 0x32f2364f, 0x5d51779a, 0x290e71cb, 0xe273bfff, 0xfa73d7bb, 0xb0a6f9b1,
+            0xff7a5605, 0x135c60ff, 0xd64d4e2e, 0x20bd369f, 0x8c450510, 0x58c6d2fb, 0xa7b21e70,
+            0xef1c2500, 0xe6b186d8, 0x6d81ae74, 0xac9b713f, 0x9c64be64, 0x7aa22b17, 0x4759d54f,
+            0xba535dd9, 0xde73bc4c, 0x5eafb897, 0x650b84d4, 0x56c57093, 0x576437e7, 0xbb5e1ef5,
+            0x49880166, 0x2cb83d92, 0x9f819a1c, 0xdbcc3c17, 0xb224338f, 0x309a6039, 0xfbd01800,
+            0x5bdf4a09, 0x83b3cbd7, 0xd0e6694c, 0x658079b3, 0x0fb225c5, 0x5e960e04, 0xf71a161a,
+            0x1c56f78f, 0xf1f574d8, 0xbca05ab7, 0x5820f777, 0x0f811b9e, 0x50ac1e83, 0x46dde673,
+            0x93270ad0, 0x27740ff7, 0xf298f7f0, 0xe6673af5, 0x355de615, 0x40fe666e, 0x8a959a60,
+            0xc1b4ed05, 0x83c3bc75, 0xe63005ea, 0x79e4db7d, 0x3c9498a8, 0xc674306e, 0xd652c2fc,
+            0xa3e34d01, 0x3fb092d2, 0x12d3880d, 0xe71b22fe, 0x593c7ebe, 0xf2a07fd0, 0x369e02f4,
+            0x5c351f4f, 0x53fa015d, 0xd70c0d77, 0x7ebf826d, 0x3b90f660, 0x72b7bec1, 0xa7e4fde6,
+            0x9c1de50b, 0xd6c8037e, 0x61b3dfd8, 0x47ba34a2, 0x63fe70c4, 0xd9bb2008, 0x21567120,
+            0xb4edfbb9, 0x65e1ce9f, 0x5e87d0ea, 0xf11a2b6c, 0xd6b5506f, 0x81c90c14, 0xcfcb2f12,
+            0x374e5a7c, 0x1b66b372, 0x38088e62, 0x5954bc0a, 0x639fe557, 0xbbb10547, 0x4e0b2fde,
+            0xc55e5a05, 0x9b856d67, 0x96207ee7, 0x055e642b, 0xdd0f881a, 0x450b18b0, 0x1f9e7855,
+            0x36a44493, 0x57c54da8, 0xf153259e, 0x590afbe5, 0xe37b139c, 0xd0beab6c, 0xfe319831,
+            0x94dffda3, 0x1e97c7dd, 0xcd02cf4b, 0xa99432c9, 0xb1e3b3aa, 0x82053b3e, 0xecf4b435,
+            0xea4cba06, 0x5b679da4, 0x1607a84b, 0x7669bcf3, 0xc8f9fbb1, 0x3a3e1fbf, 0x83cdc14d,
+            0x16f89cef, 0x4fb97f66, 0xf63f921e, 0x2e07ef3f, 0x1e32196a, 0x6cf91248, 0x64a8ffb0,
+            0x74ad50da, 0x1769b7de, 0x1df336a3, 0x5fed03ce, 0xd5aa0303, 0x3436a8e6, 0x71c3fcf9,
+            0x88826f09, 0xdd2df0b8, 0xbbf15fed, 0x1e33499d, 0xe1db844a, 0x43643154, 0xd79ade8f,
+            0x4702ab1d, 0xe0dddc79, 0x5a2b60b6, 0x5c26a6e0, 0xdd4eb914, 0x0374b383, 0xcd8fb7f4,
+            0xb555d52e, 0x282c4096, 0x7ad881ee, 0x874e9c90, 0x710cb322, 0x1b86ddec, 0x8b1ff605,
+            0x5c793112, 0x2fbaad76, 0x1b45fade, 0x525d3a28, 0xf3b95579, 0x28981bde, 0x41e7b2e7,
+            0x0647dd23, 0x9bc0dc2d, 0x13fae705, 0xa61222cb, 0xd765bcfd, 0xc4ce52e8, 0xd96fec63,
+            0x48b8f529, 0x2105f33c, 0xac3db113, 0x499fb691, 0xaed1b7d1, 0x684a1cc0, 0x57e11ce4,
+        ]
+            .span()
+    }
+
+    const GENESIS_NONCE: u256 =
+        0x0000000000000000000000000000000000000000000000000000000000001257_u256;
+}
+
+fn build_header_word_array(
+    header: @Header, prev_block_hash: Digest, merkle_root: Digest,
+) -> WordArray {
+    let mut words: WordArray = Default::default();
+
+    words.append_u32_le(*header.version);
+    words.append_span(prev_block_hash.value.span());
+    words.append_span(merkle_root.value.span());
+    words.append_span(header.final_sapling_root.value.span());
+    words.append_u32_le(*header.time);
+    words.append_u32_le(*header.bits);
+
+    words.append_span(header.nonce.value.span());
+
+    append_compact_size(header.solution.len() * 4, ref words);
+    append_solution_words(*header.solution, ref words);
+
+    words
+}
+
+fn append_solution_words(solution: Span<u32>, ref words: WordArray) {
+    for chunk in solution {
+        words.append_u32_le(*chunk);
+    }
+}
+
+fn append_compact_size(len: usize, ref words: WordArray) {
+    if len < 253 {
+        words.append_u8(len.try_into().unwrap());
+    } else if len < 65536 {
+        words.append_u8(253);
+        let (hi, lo) = DivRem::div_rem(len, 0x100);
+        words.append_u8(lo.try_into().unwrap());
+        words.append_u8(hi.try_into().unwrap());
+    } else {
+        words.append_u8(254);
+        words.append_u32_le(len);
     }
 }

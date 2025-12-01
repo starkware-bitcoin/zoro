@@ -9,15 +9,6 @@ on:
 permissions: read-all
 
 jobs:
-  markdown:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - run: |
-          sudo gem install mdl
-          mdl -s .github/linter/readme_style.rb README.md
-          mdl -s .github/linter/base_style.rb .github
-
   test-cairo:
     runs-on: ubuntu-latest
     steps:
@@ -26,41 +17,6 @@ jobs:
         with:
           scarb-version: "2.12.2"
       - run: scarb --version
-      - run: scarb test
-
-  test-rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          components: rustfmt
-          toolchain: nightly-2025-07-14
-      - run: cargo fmt --check
-      - run: cargo test
-
-  build-wasm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2025-07-14
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      - name: Install dependencies
-        run: |
-          cd raito-spv-verify-sdk
-          npm install
-      - name: Check code formatting
-        run: |
-          cd raito-spv-verify-sdk
-          npm run format:check
-      - name: Build WASM package
-        run: |
-          cd raito-spv-verify-sdk
-          npm run build
+      - run: scarb test --package consensus
+      - run: scarb test --package utils
+      - run: scarb --profile release test --package client

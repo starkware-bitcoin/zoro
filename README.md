@@ -48,8 +48,8 @@ Zoro is a reference to **Roronoa Zoro**, the swordsman from *One Piece*.
 ## Quick Start
 
 ```bash
-scarb build      # compile the Zoro Cairo packages
-scarb test       # run Zoro tests
+make build  # build Zoro client
+make test  # run Zoro tests
 ```
 
 ## Objective
