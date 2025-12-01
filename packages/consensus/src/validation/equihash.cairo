@@ -6,8 +6,9 @@ use consensus::params::{EQUIHASH_K, EQUIHASH_N, EQUIHASH_SOLUTION_SIZE_BYTES};
 use consensus::types::block::Header;
 use core::array::ArrayTrait;
 use core::traits::{Into, TryInto};
+use utils::bit_shifts::{pow32, shl64, shr64};
+use utils::blake2b::blake2b_hash;
 use utils::hash::Digest;
-use utils::{blake2b_hash, pow32, shl64, shr64};
 
 
 // 512-bit Blake2b output split into n-bit chunks
@@ -591,7 +592,7 @@ fn append_u32_le(ref bytes: Array<u8>, value: u32) {
 #[cfg(test)]
 mod tests {
     use core::array::ArrayTrait;
-    use utils::{shl64, shr64};
+    use utils::bit_shifts::{shl64, shr64};
     use super::is_valid_solution;
 
 

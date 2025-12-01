@@ -11,7 +11,7 @@
 use core::array::ArrayTrait;
 use core::num::traits::WrappingAdd;
 use core::traits::{Into, TryInto};
-use crate::{shl64, shr64};
+use crate::bit_shifts::{shl64, shr64};
 
 pub type Blake2bDigest = Array<u8>;
 

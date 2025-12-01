@@ -10,10 +10,9 @@ use utils::blake2s_hasher::{Blake2sDigest, Blake2sHasher};
 use utils::double_sha256::double_sha256_word_array;
 use utils::hash::Digest;
 use utils::word_array::{WordArray, WordArrayTrait};
-use super::transaction::Transaction;
 
 /// Represents a block in the blockchain.
-#[derive(Drop, Copy, Debug, PartialEq, Default, Serde)]
+#[derive(Drop, Copy, Debug, PartialEq, Serde)]
 pub struct Block {
     /// Block header.
     pub header: Header,
@@ -27,9 +26,6 @@ pub enum TransactionData {
     /// Merkle root of all transactions in the block.
     /// This variant is used for header-only validation mode (light client).
     MerkleRoot: Digest,
-    /// List of all transactions included in the block.
-    /// This variant is used for the full consensus validation mode.
-    Transactions: Span<Transaction>,
 }
 
 /// Represents a block header.
@@ -114,19 +110,12 @@ pub impl BlockHashImpl of BlockHash {
     }
 }
 
-/// `Default` trait implementation of `TransactionData`, i.e., empty transaction data.
-pub impl TransactionDataDefault of Default<TransactionData> {
-    fn default() -> TransactionData {
-        TransactionData::Transactions(array![].span())
-    }
-}
 
 /// `Display` trait implementation for `Block`.
 impl BlockDisplay of Display<Block> {
     fn fmt(self: @Block, ref f: Formatter) -> Result<(), Error> {
         let data = match *self.data {
             TransactionData::MerkleRoot(root) => format!("{}", root),
-            TransactionData::Transactions(txs) => format!("{}", txs.len()),
         };
         let str: ByteArray = format!(" Block {{ header: {}, data: {} }}", *self.header, @data);
         f.buffer.append(@str);
@@ -164,9 +153,6 @@ impl TransactionDataDisplay of Display<TransactionData> {
     fn fmt(self: @TransactionData, ref f: Formatter) -> Result<(), Error> {
         match *self {
             TransactionData::MerkleRoot(root) => f.buffer.append(@format!("MerkleRoot: {}", root)),
-            TransactionData::Transactions(txs) => f
-                .buffer
-                .append(@format!("Transactions: {}", txs.len())),
         }
         Result::Ok(())
     }
@@ -326,6 +312,6 @@ fn append_compact_size(len: usize, ref words: WordArray) {
         words.append_u8(hi.try_into().unwrap());
     } else {
         words.append_u8(254);
-        words.append_u32_le(len.try_into().unwrap());
+        words.append_u32_le(len);
     }
 }

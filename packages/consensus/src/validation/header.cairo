@@ -18,7 +18,6 @@ use utils::hash::Digest;
 pub fn validate_block_header(state: ChainState, block: Block) -> Result<ChainState, ByteArray> {
     let txid_root = match block.data {
         TransactionData::MerkleRoot(root) => root,
-        TransactionData::Transactions(_) => panic!("Expected Merkle root"),
     };
 
     let median_time_past = compute_median_time_past(state.prev_timestamps);

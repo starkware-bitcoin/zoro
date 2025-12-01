@@ -81,7 +81,6 @@ fn main(args: Args) -> Result {
         let prev_block_hash = current_chain_state.best_block_hash;
         let merkle_root = match block.data {
             TransactionData::MerkleRoot(root) => root,
-            TransactionData::Transactions(_) => panic!("Expected Merkle root"),
         };
         current_block_mmr =
             BoxImpl::new(
