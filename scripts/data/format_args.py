@@ -26,9 +26,13 @@ def serialize(obj):
         if obj == "0" * 64:
             # special case - zero hash
             return (0, 0, 0, 0, 0, 0, 0, 0)
+        elif len(obj) == 64 and all(c in "0123456789abcdefABCDEF" for c in obj):
+            # 64-char hex string -> Digest (8 u32 words)
+            # Reversed hex string into 4-byte words then into BE u32
+            rev = list(reversed(bytes.fromhex(obj)))
+            return tuple(int.from_bytes(rev[i : i + 4], "big") for i in range(0, 32, 4))
         elif obj.isdigit():
-            # TODO: there might still be collisions with hashes
-            # Try to cast to int and then to low/high parts
+            # Decimal string -> u256 (lo, hi)
             num = int(obj)
             assert num >= 0 and num < 2**256
             lo = num % 2**128
@@ -47,10 +51,7 @@ def serialize(obj):
             rem = int.from_bytes(src[main_len:].rjust(31, b"\x00"), "big")
             return tuple([len(main)] + main + [rem, rem_len])
         else:
-            # Reversed hex string into 4-byte words then into BE u32
-            assert len(obj) == 64, f"expected 32-byte hash: {obj}"
-            rev = list(reversed(bytes.fromhex(obj)))
-            return tuple(int.from_bytes(rev[i : i + 4], "big") for i in range(0, 32, 4))
+            raise ValueError(f"unexpected string format: {obj}")
     elif isinstance(obj, list):
         arr = list(map(serialize, obj))
         return tuple([len(arr)] + arr)

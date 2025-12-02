@@ -7,26 +7,88 @@ import time
 import logging
 from decimal import Decimal, getcontext
 from pathlib import Path
+from collections import deque
 
 import requests
-
-from generate_timestamp_data import get_timestamp_data
-from generate_utreexo_data import get_utreexo_data
-from generate_utxo_data import get_utxo_set
 
 logger = logging.getLogger(__name__)
 
 getcontext().prec = 16
 
-BITCOIN_RPC = os.getenv("BITCOIN_RPC")
+ZCASH_RPC = os.getenv("ZCASH_RPC") or os.getenv("BITCOIN_RPC")
+ZCASH_RPC_API_KEY = os.getenv("ZCASH_RPC_API_KEY") or os.getenv("BITCOIN_RPC_API_KEY")
 USERPWD = os.getenv("USERPWD")
-DEFAULT_URL = "https://bitcoin-mainnet.public.blastapi.io"
+DEFAULT_URL = os.getenv(
+    "DEFAULT_ZCASH_RPC", "https://rpc.mainnet.ztarknet.cash"
+)
+
+# =============================================================================
+# Zcash consensus parameters
+# =============================================================================
+
+POW_AVERAGING_WINDOW = 17
+MEDIAN_TIME_WINDOW = 11
+MAX_TIMESTAMP_HISTORY = POW_AVERAGING_WINDOW + MEDIAN_TIME_WINDOW
+POW_LIMIT_BITS = "1d00ffff"
+
+# Network upgrade activation heights (Zcash mainnet)
+# Must match packages/consensus/src/params.cairo
+OVERWINTER_ACTIVATION_HEIGHT = 347500   # ZIP 200, 201, 202, 203, 143
+SAPLING_ACTIVATION_HEIGHT = 419200      # ZIP 205, 212, 213, 243
+BLOSSOM_ACTIVATION_HEIGHT = 653600      # ZIP 208 - 75s block spacing
+HEARTWOOD_ACTIVATION_HEIGHT = 903000    # ZIP 213, 221 - hashBlockCommitments
+CANOPY_ACTIVATION_HEIGHT = 1046400      # ZIP 211, 212, 214, 215, 216
+NU5_ACTIVATION_HEIGHT = 1687104         # ZIP 224, 225, 226, 227, 244 - Orchard
+
+# Block timing parameters
+PRE_BLOSSOM_POW_TARGET_SPACING = 150    # seconds
+POST_BLOSSOM_POW_TARGET_SPACING = 75    # seconds
+
+# =============================================================================
+# Network upgrade helper functions
+# =============================================================================
+
+def is_overwinter_active(height: int) -> bool:
+    """Returns True if Overwinter is active at the given height."""
+    return height >= OVERWINTER_ACTIVATION_HEIGHT
+
+def is_sapling_active(height: int) -> bool:
+    """Returns True if Sapling is active at the given height."""
+    return height >= SAPLING_ACTIVATION_HEIGHT
+
+def is_blossom_active(height: int) -> bool:
+    """Returns True if Blossom is active at the given height."""
+    return height >= BLOSSOM_ACTIVATION_HEIGHT
+
+def is_heartwood_active(height: int) -> bool:
+    """Returns True if Heartwood is active at the given height."""
+    return height >= HEARTWOOD_ACTIVATION_HEIGHT
+
+def is_canopy_active(height: int) -> bool:
+    """Returns True if Canopy is active at the given height."""
+    return height >= CANOPY_ACTIVATION_HEIGHT
+
+def is_nu5_active(height: int) -> bool:
+    """Returns True if NU5 (Orchard) is active at the given height."""
+    return height >= NU5_ACTIVATION_HEIGHT
+
+def pow_target_spacing(height: int) -> int:
+    """Returns the expected PoW target spacing for a given block height."""
+    if is_blossom_active(height):
+        return POST_BLOSSOM_POW_TARGET_SPACING
+    else:
+        return PRE_BLOSSOM_POW_TARGET_SPACING
+
+# =============================================================================
+# RPC configuration
+# =============================================================================
 
 FAST = False
 RETRIES = 3
 DELAY = 2
-
-from mmr import read_block_mmr_roots
+RPC_REQUEST_LIMIT = int(os.getenv("ZCASH_RPC_LIMIT", "3"))
+RPC_REQUEST_WINDOW = int(os.getenv("ZCASH_RPC_WINDOW", "60"))
+REQUEST_LOG = deque()
 
 
 def request_rpc(method: str, params: list):
@@ -37,38 +99,49 @@ def request_rpc(method: str, params: list):
     :param delay: Delay between retries in seconds.
     :return: parsed JSON result as Python object
     """
-    url = BITCOIN_RPC or DEFAULT_URL
+    url = ZCASH_RPC or DEFAULT_URL
     auth = tuple(USERPWD.split(":")) if USERPWD else None
-    headers = {"content-type": "application/json"}
+    headers = {
+        "content-type": "application/json",
+        "accept-encoding": "identity",
+    }
+    if ZCASH_RPC_API_KEY:
+        headers["x-api-key"] = ZCASH_RPC_API_KEY
     payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 0}
 
+    def throttle():
+        if RPC_REQUEST_LIMIT <= 0:
+            return
+        now = time.time()
+        while REQUEST_LOG and now - REQUEST_LOG[0] > RPC_REQUEST_WINDOW:
+            REQUEST_LOG.popleft()
+        if len(REQUEST_LOG) >= RPC_REQUEST_LIMIT:
+            sleep_for = 1
+            time.sleep(max(sleep_for, 0))
+        REQUEST_LOG.append(time.time())
+
+    res = None
     for attempt in range(RETRIES):
         try:
+            throttle()
             res = requests.post(url, auth=auth, headers=headers, json=payload)
-            return res.json()["result"]
+            if res.status_code == 429:
+                raise ConnectionError(res.text)
+            data = res.json()
+            if "error" in data and data["error"]:
+                raise ConnectionError(data["error"])
+            if "result" not in data:
+                raise ConnectionError(f"Malformed RPC response: {data}")
+            return data["result"]
         except Exception as e:
             if attempt < RETRIES - 1:
                 logger.debug(f"Connection error: {e}, will retry in {DELAY}s")
                 time.sleep(DELAY)  # Wait before retrying
             else:
+                body = res.text if res is not None else "<no response>"
                 raise ConnectionError(
-                    f"Unexpected RPC response after {RETRIES} attempts:\n{res.text}"
+                    f"Unexpected RPC response after {RETRIES} attempts:\n{body}"
                 )
-
-
-def fetch_chain_state_fast(block_height: int):
-    """Fetches chain state at the end of a specific block with given height."""
-    block_hash = request_rpc("getblockhash", [block_height])
-    head = request_rpc("getblockheader", [block_hash])
-
-    data = get_timestamp_data(block_height)
-    head["prev_timestamps"] = [int(t) for t in data["previous_timestamps"]]
-    if block_height < 2016:
-        head["epoch_start_time"] = 1231006505
-    else:
-        head["epoch_start_time"] = int(data["epoch_start_time"])
-
-    return head
 
 
 def fetch_chain_state(block_height: int):
@@ -76,30 +149,53 @@ def fetch_chain_state(block_height: int):
     Chain state is a just a block header extended with extra fields:
         - prev_timestamps
         - epoch_start_time
+    
+    Only queries as many previous blocks as actually exist (up to MAX_TIMESTAMP_HISTORY).
     """
     # Chain state at height H is the state after applying block H
     block_hash = request_rpc("getblockhash", [block_height])
     head = request_rpc("getblockheader", [block_hash])
 
-    # In order to init prev_timestamps we need to query 10 previous headers
-    prev_header = head
+    # Calculate how many previous blocks we actually need to query
+    # We need up to MAX_TIMESTAMP_HISTORY timestamps and POW_AVERAGING_WINDOW pow targets
+    # But we can't query more blocks than exist
+    max_prev_blocks = min(block_height, max(MAX_TIMESTAMP_HISTORY - 1, POW_AVERAGING_WINDOW - 1))
+    
     prev_timestamps = [int(head["time"])]
-    for _ in range(10):
-        if prev_header["height"] == 0:
+    pow_history = [bits_to_target(head["bits"])]
+    current_header = head
+    
+    # Only query the blocks that actually exist
+    for _ in range(max_prev_blocks):
+        prev_hash = current_header.get("previousblockhash")
+        if not prev_hash:
             break
-        else:
-            prev_header = request_rpc(
-                "getblockheader", [prev_header["previousblockhash"]]
-            )
-            prev_timestamps.insert(0, int(prev_header["time"]))
+        current_header = request_rpc("getblockheader", [prev_hash])
+        if len(prev_timestamps) < MAX_TIMESTAMP_HISTORY:
+            prev_timestamps.insert(0, int(current_header["time"]))
+        if len(pow_history) < POW_AVERAGING_WINDOW:
+            pow_history.insert(0, bits_to_target(current_header["bits"]))
+
+    # DON'T pad timestamps or pow_history - the Cairo code uses the lengths to determine
+    # whether to run difficulty adjustment. For early blocks, we want to skip adjustment
+    # and use the target from the block's nBits instead.
+
     head["prev_timestamps"] = prev_timestamps
 
     # In order to init epoch start we need to query block header at epoch start
     if block_height < 2016:
-        head["epoch_start_time"] = 1231006505
+        head["epoch_start_time"] = 1477953400  # Zcash genesis time
     else:
         head["epoch_start_time"] = get_epoch_start_time(block_height)
 
+    head["pow_target_history"] = pow_history
+    
+    # Compute total work (sum of work for all blocks up to this height)
+    # For simplicity, we approximate by computing work for this block times (height + 1)
+    # This is a rough approximation since difficulty varies, but it's good enough for testing
+    block_work = target_to_work(bits_to_target(head["bits"]))
+    head["total_work"] = block_work * (block_height + 1)
+    
     return head
 
 
@@ -113,14 +209,35 @@ def get_epoch_start_time(block_height: int) -> int:
 
 def format_chain_state(head: dict):
     """Formats chain state according to the respective Cairo type."""
+    # Zcash RPC doesn't return chainwork, so we use a stored value or compute it
+    if "chainwork" in head:
+        total_work = int.from_bytes(bytes.fromhex(head["chainwork"]), "big")
+    elif "total_work" in head:
+        total_work = head["total_work"]
+    else:
+        # For genesis or early blocks, start with work from target
+        total_work = target_to_work(bits_to_target(head["bits"]))
+    
     return {
         "block_height": head["height"],
-        "total_work": str(int.from_bytes(bytes.fromhex(head["chainwork"]), "big")),
+        "total_work": str(total_work),
         "best_block_hash": head["hash"],
         "current_target": str(bits_to_target(head["bits"])),
-        "epoch_start_time": head["epoch_start_time"],
         "prev_timestamps": head["prev_timestamps"],
+        "epoch_start_time": head["epoch_start_time"],
+        "pow_target_history": [
+            str(value) for value in head.get("pow_target_history", [])
+        ],
     }
+
+
+def target_to_work(target: int) -> int:
+    """Convert target to work (approximate).
+    Work = 2^256 / (target + 1)
+    """
+    if target == 0:
+        return 0
+    return (2**256) // (target + 1)
 
 
 def bits_to_target(bits: str) -> int:
@@ -139,18 +256,18 @@ def bits_to_target(bits: str) -> int:
         return mantissa << (8 * (exponent - 3))
 
 
-def fetch_block(block_hash: str, fast: bool):
+def bits_int_to_target(bits_int: int) -> int:
+    return bits_to_target(bits_int.to_bytes(4, "big").hex())
+
+
+POW_LIMIT_TARGET = bits_to_target(POW_LIMIT_BITS)
+
+
+def fetch_block(block_hash: str):
     """Downloads block with transactions (and referred UTXOs) from RPC given the block hash."""
     block = request_rpc("getblock", [block_hash, 2])
-
-    previous_outputs = (
-        {(o["txid"], int(o["vout"])): o for o in get_utxo_set(block["height"])}
-        if fast
-        else None
-    )
-
     block["data"] = {
-        tx["txid"]: resolve_transaction(tx, previous_outputs) for tx in block["tx"]
+        tx["txid"]: resolve_transaction(tx, None) for tx in block["tx"]
     }
     return block
 
@@ -280,17 +397,67 @@ def format_block(header: dict):
     }
 
 
+def parse_bits(bits_value: str) -> int:
+    bits_value = bits_value.lower()
+    if bits_value.startswith("0x"):
+        bits_value = bits_value[2:]
+    return int(bits_value, 16)
+
+
 def format_header(header: dict):
     """Formats header according to the respective Cairo type.
 
     :param header: block header obtained from RPC
+    
+    The header commitment field changes based on network upgrades:
+    - Pre-Sapling (< 419200): Reserved field (all zeros)
+    - Sapling to Heartwood (419200 - 902999): hashFinalSaplingRoot
+    - Heartwood to NU5 (903000 - 1687103): hashLightClientRoot (blockcommitments)
+    - NU5+ (>= 1687104): hashBlockCommitments (includes Orchard)
     """
+    height = header.get("height", 0)
+    
+    # Determine the correct commitment field based on network upgrade
+    if is_heartwood_active(height):
+        # After Heartwood: use blockcommitments (hashLightClientRoot/hashBlockCommitments)
+        hash_commitment = header.get("blockcommitments", "0" * 64)
+    elif is_sapling_active(height):
+        # Sapling to Heartwood: use finalsaplingroot
+        hash_commitment = header.get("finalsaplingroot", "0" * 64)
+    else:
+        # Pre-Sapling: reserved field (should be all zeros)
+        hash_commitment = header.get("finalsaplingroot", "0" * 64)
+    
     return {
         "version": header["version"],
+        "final_sapling_root": hash_commitment,
         "time": header["time"],
-        "bits": int.from_bytes(bytes.fromhex(header["bits"]), "big"),
-        "nonce": header["nonce"],
+        "bits": parse_bits(header["bits"]),
+        "nonce": normalize_hash_string(header.get("nonce", "0" * 64)),
+        "solution": format_solution(header.get("solution", "")),
     }
+
+
+def normalize_hash_string(value: str) -> str:
+    value = value.lower()
+    if value.startswith("0x"):
+        return value[2:]
+    return value
+
+
+def format_solution(solution_hex: str) -> list[int]:
+    solution_hex = solution_hex.lower()
+    if solution_hex.startswith("0x"):
+        solution_hex = solution_hex[2:]
+    if not solution_hex:
+        return []
+    data = bytes.fromhex(solution_hex)
+    if len(data) % 4 != 0:
+        raise ValueError(f"Equihash solution must be multiple of 4 bytes, got {len(data)}")
+    words: list[int] = []
+    for i in range(0, len(data), 4):
+        words.append(int.from_bytes(data[i : i + 4], "little"))
+    return words
 
 
 def next_chain_state(current_state: dict, new_block: dict) -> dict:
@@ -300,7 +467,7 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
     # We need to recalculate the prev_timestamps field given the previous chain state
     # and all the blocks we applied to it
     prev_timestamps = current_state["prev_timestamps"] + [new_block["time"]]
-    next_state["prev_timestamps"] = prev_timestamps[-11:]
+    next_state["prev_timestamps"] = prev_timestamps[-MAX_TIMESTAMP_HISTORY:]
 
     # Update epoch start time
     if new_block["height"] % 2016 == 0:
@@ -308,37 +475,45 @@ def next_chain_state(current_state: dict, new_block: dict) -> dict:
     else:
         next_state["epoch_start_time"] = current_state["epoch_start_time"]
 
+    pow_history = list(current_state.get("pow_target_history", []))
+    if not pow_history:
+        pow_history = [POW_LIMIT_TARGET] * POW_AVERAGING_WINDOW
+    pow_history.append(bits_to_target(new_block["bits"]))
+    next_state["pow_target_history"] = pow_history[-POW_AVERAGING_WINDOW:]
+
+    # Compute cumulative total work
+    current_total_work = current_state.get("total_work", 0)
+    if isinstance(current_total_work, str):
+        current_total_work = int(current_total_work)
+    block_work = target_to_work(bits_to_target(new_block["bits"]))
+    next_state["total_work"] = current_total_work + block_work
+
     return next_state
 
 
 def generate_data(
-    mode: str,
     initial_height: int,
     num_blocks: int,
     fast: bool,
-    mmr_roots: bool = True,  # TODO: remove it
 ):
-    """Generates arguments for Raito program in a human readable form and the expected result.
+    """Generates arguments for Zoro program in a human readable form and the expected result.
 
-    :param mode: Validation mode:
-        "light" — generate block headers with Merkle root only
-        "full" — generate full blocks with transactions (and referenced UTXOs)
-        "utreexo" — only last block from the batch is included, but it is extended with Utreexo state/proofs
     :param initial_height: The block height of the initial chain state (0 means the state after genesis)
     :param num_blocks: The number of blocks to apply on top of it (has to be at least 1)
-    :param fast: Use data exported from BigQuery rather than Bitcoin node
+    :param fast: Placeholder, kept for backwards compatibility (ignored)
     :return: tuple (arguments, expected output)
     """
 
+    if fast:
+        logger.warning(
+            "Fast mode is not supported for the Zcash data pipeline; falling back to RPC-backed flow."
+        )
+
     logger.debug(
-        f"Fetching initial chain state{' (fast)' if fast else ' '}, blocks: [{initial_height}, {initial_height + num_blocks - 1}]..."
+        f"Fetching initial chain state, blocks: [{initial_height}, {initial_height + num_blocks - 1}]..."
     )
 
-    chain_state = (
-        fetch_chain_state_fast(initial_height)
-        if fast
-        else fetch_chain_state(initial_height)
-    )
+    chain_state = fetch_chain_state(initial_height)
     initial_chain_state = chain_state
 
     next_block_hash = chain_state["nextblockhash"]
@@ -350,41 +525,9 @@ def generate_data(
 
         logger.debug(f"Fetching block {initial_height + i + 1} {i + 1}/{num_blocks}...")
 
-        # Interblock cache
-        tmp_utxo_set = {}
-
-        if mode == "light":
-            block = fetch_block_header(next_block_hash)
-        elif mode in ["full", "utreexo"]:
-            block = fetch_block(next_block_hash, fast)
-
-            # Build UTXO set and mark outputs spent within the same block (span).
-            # Also set "cached" flag for the inputs that spend those UTXOs.
-            for txid, tx in block["data"].items():
-                for tx_input in tx["inputs"]:
-                    outpoint = (
-                        tx_input["previous_output"]["txid"],
-                        tx_input["previous_output"]["vout"],
-                    )
-                    if outpoint in tmp_utxo_set:
-                        tx_input["previous_output"]["data"]["cached"] = True
-                        tmp_utxo_set[outpoint]["cached"] = True
-
-                for idx, output in enumerate(tx["outputs"]):
-                    outpoint = (txid, idx)
-                    tmp_utxo_set[outpoint] = output
-
-            # Do another pass to mark UTXOs spent within the same block (span) with "cached" flag.
-            for txid, tx in block["data"].items():
-                for idx, output in enumerate(tx["outputs"]):
-                    outpoint = (txid, idx)
-                    if outpoint in tmp_utxo_set and tmp_utxo_set[outpoint]["cached"]:
-                        tx["outputs"][idx]["cached"] = True
-
-        else:
-            raise NotImplementedError(mode)
-
+        block = fetch_block_header(next_block_hash)
         blocks.append(block)
+
         chain_state = next_chain_state(chain_state, block)
 
         logger.info(f"block: {block}")
@@ -393,19 +536,18 @@ def generate_data(
 
         logger.info(f"Fetched block {initial_height + i + 1} {i + 1}/{num_blocks}")
 
-    block_formatter = (
-        format_block if mode == "light" else format_block_with_transactions
-    )
+    formatted_blocks = list(map(format_block, blocks))
     result = {
         "chain_state": format_chain_state(initial_chain_state),
-        "blocks": list(map(block_formatter, blocks)),
-        "mmr_roots": read_block_mmr_roots(initial_height) if mmr_roots else None,
+        "blocks": formatted_blocks,
         "expected": format_chain_state(chain_state),
     }
 
-    if mode == "utreexo":
-        assert len(blocks) == 1, "Cannot handle more than one block in Utreexo mode"
-        result["utreexo"] = get_utreexo_data(blocks[0]["height"])
+    if formatted_blocks:
+        first_bits = formatted_blocks[0]["header"]["bits"]
+        last_bits = formatted_blocks[-1]["header"]["bits"]
+        result["chain_state"]["current_target"] = str(bits_int_to_target(first_bits))
+        result["expected"]["current_target"] = str(bits_int_to_target(last_bits))
 
     return result
 
@@ -421,9 +563,7 @@ def str2bool(value):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
-# Example: generate_data.py --mode 'light' --height 0 --num_blocks 10 --output_file light_0_10.json
-# Example: generate_data.py --mode 'full' --height 0 --num_blocks 10 --output_file full_0_10.json --fast
-# Example: generate_data.py --mode 'utreexo' --height 0 --num_blocks 10 --output_file utreexo_0_10.json --fast
+# Example: generate_data.py --height 0 --num_blocks 10 --output_file light_0_10.json
 if __name__ == "__main__":
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
@@ -437,13 +577,6 @@ if __name__ == "__main__":
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     parser = argparse.ArgumentParser(description="Process UTXO files.")
-    parser.add_argument(
-        "--mode",
-        dest="mode",
-        default="full",
-        choices=["light", "full", "utreexo"],
-        help="Mode",
-    )
 
     parser.add_argument(
         "--height",
@@ -470,7 +603,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data = generate_data(
-        mode=args.mode,
         initial_height=args.height,
         num_blocks=args.num_blocks,
         fast=args.fast,
