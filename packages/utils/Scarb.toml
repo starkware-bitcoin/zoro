@@ -12,3 +12,4 @@ lint = "scarb fmt"
 [features]
 default = []
 syscalls = []
+blake2b = []

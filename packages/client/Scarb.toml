@@ -22,3 +22,4 @@ regenerate_tests = "../../scripts/data/regenerate_tests.sh"
 [features]
 default = ["syscalls"]
 syscalls = ["consensus/syscalls"]
+blake2b = ["consensus/blake2b"]

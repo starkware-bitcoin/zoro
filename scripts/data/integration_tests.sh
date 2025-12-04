@@ -15,6 +15,7 @@ test_files=()
 nocapture=0
 forceall=0
 lightonly=0
+features=""
 
 # Process arguments
 for arg in "$@"; do
@@ -24,6 +25,8 @@ for arg in "$@"; do
     lightonly=1
   elif [[ "$arg" == "--forceall" ]]; then
     forceall=1
+  elif [[ "$arg" == --features=* ]]; then
+    features="${arg#--features=}"
   else
     test_files+=("$arg")  # Add only non-flag arguments as test files
   fi
@@ -60,17 +63,23 @@ for test_file in "${test_files[@]}"; do
             arguments_file="$(dirname "$test_file")/.arguments-$(basename "$test_file")"
             python3 ../../scripts/data/format_args.py --input_file ${test_file} > $arguments_file
             # output=$($SCARB burn --arguments-file $arguments_file --output-file flamegraph.svg --open-in-browser)
-            output=$($SCARB --profile release execute --print-resource-usage --arguments-file $arguments_file)
+            if [[ -n "$features" ]]; then
+                output=$($SCARB --profile release execute --features "$features" --print-resource-usage --arguments-file $arguments_file)
+            else
+                output=$($SCARB --profile release execute --print-resource-usage --arguments-file $arguments_file)
+            fi
             # See https://github.com/software-mansion/scarb/pull/2276
             rm -rf ../../target/execute
             steps=$(echo $output | grep -o 'steps: [0-9,]*' | sed 's/steps: //')
 
             if [[ "$nocapture" -eq 1 ]]; then
-                echo -e "\n$output"
+                mkdir -p ../../tests/data/outputs
+                echo -e "\n$output" > ../../tests/data/outputs/$(Date +%s)-$(basename "$test_file").out
             fi
 
             if [[ "$output" == *"FAIL"* ]]; then
                 echo -e "${RED} fail ${RESET}(steps: $steps)"
+                echo -e "\n$output\n"
                 num_fail=$((num_fail + 1))
                 error=$(echo $output | grep -o "error='[^']*'" | sed "s/error=//")
                 failures+="\t$test_file — Panicked with $error\n"
@@ -80,6 +89,7 @@ for test_file in "${test_files[@]}"; do
                 rm $arguments_file
             else
                 echo -e "${RED} fail ${RESET}"
+                echo -e "\n$output\n"
                 num_fail=$((num_fail + 1))
                 error=$(echo "$output" | sed '1d' | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g') #spellchecker:disable-line
                 failures+="\t$test_file — $error\n"

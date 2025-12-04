@@ -13,6 +13,9 @@ use core::num::traits::WrappingAdd;
 use core::traits::{Into, TryInto};
 use crate::bit_shifts::{shl64, shr64};
 
+#[cfg(feature: "blake2b")]
+use core::blake::{Blake2bHasherTrait, Blake2bParamsTrait};
+
 pub type Blake2bDigest = Array<u8>;
 
 const BLAKE2B_BLOCKBYTES: usize = 128;
@@ -434,13 +437,82 @@ fn blake2b_finalize(ref state: Blake2bState) -> Array<u8> {
     out
 }
 
-// Convenience one-shot hash
+// Convenience one-shot hash ( Cairo1 implementation ).
+#[cfg(not(feature:"blake2b"))]
 pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) -> Blake2bDigest {
     let mut st = blake2b_init(outlen, personalization);
 
     blake2b_update(ref st, input);
 
     blake2b_finalize(ref st)
+}
+
+// Convenience one-shot hash ( Opcode implementation ).
+#[cfg(feature:"blake2b")]
+pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) -> Blake2bDigest {
+    // Convert personalization [u8; 16] to [u64; 2] (little-endian)
+    let personal_u64 = personalization_to_u64_pair(personalization);
+
+    // Create hasher with parameters
+    let mut hasher = Blake2bParamsTrait::new()
+        .hash_length(outlen.try_into().unwrap())
+        .personal(personal_u64)
+        .to_state();
+
+    // Process input
+    hasher.update(input);
+
+    // Finalize and get state (Box<[u64; 8]>)
+    let state = hasher.finalize();
+
+    // Convert state [u64; 8] to bytes, truncated to outlen
+    state_to_bytes(state.unbox(), outlen)
+}
+
+/// Convert a 16-byte personalization array to two little-endian u64 words.
+pub fn personalization_to_u64_pair(personal: [u8; 16]) -> [u64; 2] {
+    let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = personal;
+
+    let word0: u64 = b0.into() + shl64(b1.into(), 8) + shl64(b2.into(), 16)
+        + shl64(b3.into(), 24) + shl64(b4.into(), 32) + shl64(b5.into(), 40)
+        + shl64(b6.into(), 48) + shl64(b7.into(), 56);
+
+    let word1: u64 = b8.into() + shl64(b9.into(), 8) + shl64(b10.into(), 16)
+        + shl64(b11.into(), 24) + shl64(b12.into(), 32) + shl64(b13.into(), 40)
+        + shl64(b14.into(), 48) + shl64(b15.into(), 56);
+
+    [word0, word1]
+}
+
+/// Convert a u64 word to little-endian bytes, appending up to `count` bytes.
+fn append_u64_le_bytes(ref out: Array<u8>, word: u64, count: u32) {
+    let mut remaining = word;
+    let mut i: u32 = 0;
+    while i < count {
+        out.append((remaining % 256).try_into().unwrap());
+        remaining = remaining / 256;
+        i += 1;
+    };
+}
+
+/// Convert Blake2b state (8 x u64 words) to a byte array, truncated to outlen bytes.
+pub fn state_to_bytes(state: [u64; 8], outlen: u32) -> Array<u8> {
+    let [w0, w1, w2, w3, w4, w5, w6, w7] = state;
+    let words: [u64; 8] = [w0, w1, w2, w3, w4, w5, w6, w7];
+
+    let mut out: Array<u8> = array![];
+    let mut remaining = outlen;
+
+    for word in words.span() {
+        if remaining == 0 {
+            break;
+        }
+        let count = if remaining >= 8 { 8 } else { remaining };
+        append_u64_le_bytes(ref out, *word, count);
+        remaining -= count;
+    };
+
+    out
 }
 
 #[cfg(test)]
