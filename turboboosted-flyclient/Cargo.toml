@@ -1,0 +1,26 @@
+[package]
+name = "turboboosted-flyclient"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zcash_primitives = { path = "../../librustzcash/zcash_primitives", default-features = false }
+zcash_history = { path = "../../librustzcash/zcash_history" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+primitive-types = "0.12"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1.48", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+futures = "0.3"
+
+[[bin]]
+name = "sync"
+path = "src/bin/sync.rs"
+
+[workspace]
+resolver = "2"
