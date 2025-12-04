@@ -23,3 +23,4 @@ regenerate_tests = "../../scripts/data/regenerate_tests.sh"
 default = ["syscalls"]
 syscalls = ["consensus/syscalls"]
 blake2b = ["consensus/blake2b"]
+blake2b_mock = ["consensus/blake2b_mock"]

@@ -13,3 +13,4 @@ lint = "scarb fmt"
 default = []
 syscalls = []
 blake2b = []
+blake2b_mock = []

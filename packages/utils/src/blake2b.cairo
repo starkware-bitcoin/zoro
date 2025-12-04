@@ -438,7 +438,9 @@ fn blake2b_finalize(ref state: Blake2bState) -> Array<u8> {
 }
 
 // Convenience one-shot hash ( Cairo1 implementation ).
-#[cfg(not(feature:"blake2b"))]
+// Used when neither blake2b nor blake2b_mock features are enabled.
+#[cfg(not(feature: "blake2b"))]
+#[cfg(not(feature: "blake2b_mock"))]
 pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) -> Blake2bDigest {
     let mut st = blake2b_init(outlen, personalization);
 
@@ -447,8 +449,23 @@ pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) ->
     blake2b_finalize(ref st)
 }
 
+// Convenience one-shot hash ( Mock implementation - returns zeros ).
+// Used when blake2b_mock feature is enabled.
+#[cfg(feature: "blake2b_mock")]
+pub fn blake2b_hash(_input: Array<u8>, outlen: u32, _personalization: [u8; 16]) -> Blake2bDigest {
+    let mut out: Array<u8> = array![];
+    let mut i: u32 = 0;
+    while i < outlen {
+        out.append(0_u8);
+        i += 1;
+    };
+    out
+}
+
 // Convenience one-shot hash ( Opcode implementation ).
-#[cfg(feature:"blake2b")]
+// Used when blake2b feature is enabled (and blake2b_mock is NOT enabled).
+#[cfg(feature: "blake2b")]
+#[cfg(not(feature: "blake2b_mock"))]
 pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) -> Blake2bDigest {
     // Convert personalization [u8; 16] to [u64; 2] (little-endian)
     let personal_u64 = personalization_to_u64_pair(personalization);
