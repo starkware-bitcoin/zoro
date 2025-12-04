@@ -44,11 +44,8 @@ impl Indexer {
     async fn run_inner(&mut self) -> Result<(), anyhow::Error> {
         info!("Block indexer started");
 
-        let mut bitcoin_client = ZcashClient::new(
-            self.config.rpc_url.clone(),
-            self.config.rpc_userpwd.clone(),
-        )
-        .await?;
+        let mut bitcoin_client =
+            ZcashClient::new(self.config.rpc_url.clone(), self.config.rpc_userpwd.clone()).await?;
         info!("Bitcoin RPC client initialized");
 
         // We need to specify mmr_id to have deterministic keys in the database

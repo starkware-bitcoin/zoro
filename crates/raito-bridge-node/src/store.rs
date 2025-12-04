@@ -11,9 +11,9 @@ use sqlx::sqlite::{
 };
 use sqlx::{Row, TransactionManager};
 use tokio::fs;
+use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
 use zebra_chain::serialization::ZcashDeserialize;
-use zebra_chain::block::Hash;
 use zebra_chain::serialization::ZcashSerialize;
 
 use crate::chain_state::ChainStateStore;
@@ -128,15 +128,12 @@ impl AppStore {
 #[async_trait]
 impl ChainStateStore for AppStore {
     /// Add a new block header to the store
-    async fn add_block_header(
-        &self,
-        height: u32,
-        block_header: &Header,
-    ) -> Result<(), StoreError> {
+    async fn add_block_header(&self, height: u32, block_header: &Header) -> Result<(), StoreError> {
         let mut conn = self.0.acquire_connection().await?;
 
         let mut block_header_data = Vec::new();
-        block_header.zcash_serialize(&mut block_header_data)
+        block_header
+            .zcash_serialize(&mut block_header_data)
             .map_err(|e| StoreError::Custom(Box::new(e)))?;
 
         sqlx::query("INSERT INTO block_headers (height, hash, header) VALUES (?, ?, ?)")

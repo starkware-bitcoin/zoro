@@ -1,10 +1,10 @@
 //! HTTP RPC server providing REST endpoints for MMR proof generation and block count queries.
 
 use accumulators::hasher::stark_blake::StarkBlakeHasher;
-use zcash_client::ZcashClient;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info};
+use zcash_client::ZcashClient;
 
 use axum::{
     extract::{Path, Query, State},
@@ -13,9 +13,9 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use zebra_chain::block::Header;
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use zebra_chain::block::Header;
 
 use raito_spv_mmr::{
     block_mmr::{BlockInclusionProof, BlockMMR},
@@ -75,8 +75,8 @@ impl AppState {
         ));
         let hasher = StarkBlakeHasher::default();
         let mmr = BlockMMR::new(store.clone(), Arc::new(hasher), mmr_id);
-        let bitcoin_client = ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone())
-            .await?;
+        let bitcoin_client =
+            ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {
             mmr: Arc::new(mmr),
             bitcoin_client: Arc::new(bitcoin_client),
