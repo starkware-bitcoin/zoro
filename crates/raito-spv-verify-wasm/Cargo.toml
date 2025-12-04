@@ -1,0 +1,41 @@
+[package]
+name = "raito-spv-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core SPV verification functionality
+raito-spv-verify = { path = "../raito-spv-verify" }
+raito-spv-mmr = { path = "../raito-spv-mmr" }
+
+# Zcash types
+zebra-chain.workspace = true
+
+# Stwo-cairo
+cairo-air = { git = "https://github.com/maciejka/stwo-cairo", rev = "e5981958234c4b28fa2b4c3368a0290ec3fc57c2", default-features = false, features = ["std"] }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Serialization for WASM
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging (optional for WASM)
+console_error_panic_hook = "0.1"
+
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+stwo-prover = { git = "https://github.com/starkware-libs/stwo", rev = "0e90b31", features = [], default-features = false }
