@@ -6,6 +6,8 @@ edition = "2024_07"
 [executable]
 allow-syscalls = true
 
+[lib]
+
 [dependencies]
 cairo_execute = "2.11.4"
 consensus = { path = "../consensus" }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-SCARB="scarb"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCARB="$SCRIPT_DIR/../../../scarb/target/debug/scarb"
 
 GREEN='\033[0;32m'
 RED='\033[1;31m'
