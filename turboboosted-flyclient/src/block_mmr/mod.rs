@@ -11,7 +11,7 @@ pub use proof_generator::generate_proof;
 pub use store::{MemoryStore, NodeStore, SqliteStore};
 
 use primitive_types::U256;
-use zcash_history::{NodeData, Version, V1};
+use zcash_history::{Entry, NodeData, Tree, Version, V1};
 use zcash_primitives::block::BlockHeader;
 
 pub use zcash_primitives::block::BlockHash;
@@ -62,8 +62,135 @@ pub fn node_data_from_header(
 }
 
 /// Compute the FlyClient root hash from a tree
-pub fn compute_root(tree: &zcash_history::Tree<V1>) -> Option<[u8; 32]> {
+pub fn compute_root(tree: &Tree<V1>) -> Option<[u8; 32]> {
     tree.root_node().ok().map(|n| V1::hash(n.data()))
+}
+
+/// Generate an inclusion proof for a block given its hash.
+///
+/// # Arguments
+/// * `store` - Any store implementing `NodeStore` trait
+/// * `block_hash` - The 32-byte block hash to prove inclusion for
+///
+/// # Returns
+/// * `Ok((proof, root))` - The inclusion proof and the current tree root
+/// * `Err` - If the block is not found or proof generation fails
+///
+/// # Example
+/// ```ignore
+/// let store = SqliteStore::open("mmr.db")?;
+/// let block_hash = hex::decode("00000000010fbfbe...")?;
+/// let (proof, root) = proof_for_block_hash(&store, &block_hash)?;
+/// assert!(proof.verify(&root));
+/// ```
+pub fn proof_for_block_hash(
+    store: &impl NodeStore,
+    block_hash: &[u8; 32],
+) -> Result<(ZcashInclusionProof, [u8; 32]), String> {
+    let tree = load_tree_from_store(store).ok_or("No tree data in store")?;
+    let leaf_count = count_leaves(tree.len());
+    let leaf_index = find_block_by_hash(store, block_hash)?;
+    let proof = generate_proof(&tree, leaf_index, leaf_count)?;
+    let root = compute_root(&tree).ok_or("Failed to compute root")?;
+    Ok((proof, root))
+}
+
+/// Generate an inclusion proof for a block at a specific height.
+///
+/// # Arguments
+/// * `store` - Any store implementing `NodeStore` trait
+/// * `height` - The block height (must be >= Heartwood activation height)
+///
+/// # Returns
+/// * `Ok((proof, root))` - The inclusion proof and the current tree root
+/// * `Err` - If the height is out of range or proof generation fails
+pub fn proof_for_height(
+    store: &impl NodeStore,
+    height: u32,
+) -> Result<(ZcashInclusionProof, [u8; 32]), String> {
+    let start_height = activation_height::HEARTWOOD;
+
+    if height < start_height {
+        return Err(format!(
+            "Height {height} is before Heartwood activation ({start_height})"
+        ));
+    }
+
+    let tree = load_tree_from_store(store).ok_or("No tree data in store")?;
+    let leaf_count = count_leaves(tree.len());
+    let leaf_index = height - start_height;
+
+    if leaf_index >= leaf_count {
+        return Err(format!(
+            "Height {height} not synced. Tree only has blocks up to {}",
+            start_height + leaf_count - 1
+        ));
+    }
+
+    let proof = generate_proof(&tree, leaf_index, leaf_count)?;
+    let root = compute_root(&tree).ok_or("Failed to compute root")?;
+
+    Ok((proof, root))
+}
+
+/// Load tree from any NodeStore by replaying leaf nodes
+fn load_tree_from_store(store: &impl NodeStore) -> Option<Tree<V1>> {
+    let mut tree: Option<Tree<V1>> = None;
+    for pos in 0..store.len() {
+        if is_leaf_pos(pos) {
+            if let Some(node) = store.get(pos) {
+                match &mut tree {
+                    None => tree = Some(Tree::new(1, vec![(0, Entry::new_leaf(node))], vec![])),
+                    Some(t) => {
+                        t.append_leaf(node).ok();
+                    }
+                }
+            }
+        }
+    }
+    tree
+}
+
+/// Find a block by its hash, returning its leaf index
+fn find_block_by_hash(store: &impl NodeStore, block_hash: &[u8; 32]) -> Result<u32, String> {
+    let mut leaf_index = 0u32;
+    for pos in 0..store.len() {
+        if is_leaf_pos(pos) {
+            if let Some(node) = store.get(pos) {
+                // For leaf nodes, subtree_commitment contains the block hash
+                if &node.subtree_commitment == block_hash {
+                    return Ok(leaf_index);
+                }
+                leaf_index += 1;
+            }
+        }
+    }
+    Err(format!(
+        "Block {} not found in tree",
+        hex::encode(block_hash)
+    ))
+}
+
+/// Count leaf nodes in an MMR of given size
+fn count_leaves(tree_size: u32) -> u32 {
+    (0..tree_size).filter(|&p| is_leaf_pos(p)).count() as u32
+}
+
+/// Check if MMR position is a leaf (height 0)
+fn is_leaf_pos(pos: u32) -> bool {
+    pos_height(pos) == 0
+}
+
+/// Compute height of node at given MMR position
+fn pos_height(mut pos: u32) -> u32 {
+    loop {
+        let n = pos + 1;
+        if (n & (n + 1)) == 0 {
+            return n.count_ones() - 1;
+        }
+        let left_subtree = (1u32 << (32 - n.leading_zeros() - 1)) - 1;
+        pos -= left_subtree;
+    }
 }
 
 #[cfg(test)]

@@ -338,3 +338,66 @@ mod mainnet {
         println!("\n✓ All mainnet proofs verified successfully!");
     }
 }
+
+#[test]
+fn test_proof_for_height_and_hash() {
+    // Build a store with test data
+    let mut store = SqliteStore::open_in_memory().unwrap();
+
+    // Add 10 blocks to store
+    let block_count = 10u32;
+    let mut tree: Option<Tree<V1>> = None;
+    for i in 0..block_count {
+        let node = test_node(i);
+        if tree.is_none() {
+            tree = Some(Tree::new(
+                1,
+                vec![(0, Entry::new_leaf(node.clone()))],
+                vec![],
+            ));
+        } else {
+            tree.as_mut().unwrap().append_leaf(node.clone()).unwrap();
+        }
+        // Store all nodes
+        for p in 0..tree.as_ref().unwrap().len() {
+            if let Ok(entry) = tree
+                .as_ref()
+                .unwrap()
+                .resolve_link(zcash_history::EntryLink::Stored(p))
+            {
+                store.set(p, entry.data().clone());
+            }
+        }
+    }
+
+    // Test proof_for_height
+    let height = activation_height::HEARTWOOD + 5;
+    let (proof, root) = super::proof_for_height(&store, height).unwrap();
+    assert!(proof.verify(&root), "proof_for_height should verify");
+    assert_eq!(
+        proof.leaf.start_height, height as u64,
+        "Proof should be for correct height"
+    );
+
+    // Test proof_for_block_hash
+    let block_hash = [6u8; 32]; // test_node(5) has subtree_commitment = [6; 32]
+    let (proof2, root2) = super::proof_for_block_hash(&store, &block_hash).unwrap();
+    assert!(proof2.verify(&root2), "proof_for_block_hash should verify");
+    assert_eq!(
+        proof2.leaf.subtree_commitment, block_hash,
+        "Proof should be for correct block"
+    );
+
+    // Test error cases
+    let err = super::proof_for_height(&store, 900_000);
+    assert!(err.is_err(), "Height before Heartwood should error");
+
+    let err = super::proof_for_height(&store, activation_height::HEARTWOOD + 100);
+    assert!(err.is_err(), "Height beyond synced range should error");
+
+    let fake_hash = [0xFFu8; 32];
+    let err = super::proof_for_block_hash(&store, &fake_hash);
+    assert!(err.is_err(), "Unknown block hash should error");
+
+    println!("✓ proof_for_height and proof_for_block_hash tests passed");
+}
