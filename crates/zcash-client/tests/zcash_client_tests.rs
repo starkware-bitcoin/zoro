@@ -1,4 +1,6 @@
 use zcash_client::ZcashClient;
+use zebra_chain::transaction::Hash;
+use hex::FromHex;
 #[tokio::test]
 async fn zcash_client_main_flow_like_example() {
     // Same parameters as `crates/raito-bitcoin-client/src/main.rs`
@@ -62,22 +64,14 @@ async fn zcash_client_main_flow_like_example() {
 async fn zcash_client_get_transaction_test() {
     // these should contain all the different tx versions
     let txids_hex = [
-        hex::decode("55ab20ae2d528fd612ed55b419950ebac20f4c59ea841b7fe5db97f9c3e7e206")
-            .expect("Invalid txid hex"),
-        hex::decode("a6cabf193af5066654d9929e54ea6bc1f794c5d07d7247a3893eeef4e5bfe17f")
-            .expect("Invalid txid hex"),
-        hex::decode("b2aa4c149a451d75fff16d0b97291dab06cb2788ebc44be3cfeb61b847446c2b")
-            .expect("Invalid txid hex"),
-        hex::decode("c61e5ce69c9892ee36602d6d31458f381750d52983fc471f874f95f57d9afeab")
-            .expect("Invalid txid hex"),
-        hex::decode("84832e66f3261737b84da806f62bc07dce03e3002bef412766faa3d123f066e1")
-            .expect("Invalid txid hex"),
-        hex::decode("ac694dd10970909bf1bfc6bd71f5e6c924b174a5ddf6529f5ba3b8e721724f9c")
-            .expect("Invalid txid hex"),
-        hex::decode("381b65eb3fa04c1c78e73d4488b7e0b02f0469e5bd8e222f84c7896410e966dd")
-            .expect("Invalid txid hex"),
-        hex::decode("0a5803ee986c48fb9b8c8d949ee6b4e8f48c2d81a94fb36bbf168d66753a0d41")
-            .expect("Invalid txid hex"),
+        "55ab20ae2d528fd612ed55b419950ebac20f4c59ea841b7fe5db97f9c3e7e206",
+        "a6cabf193af5066654d9929e54ea6bc1f794c5d07d7247a3893eeef4e5bfe17f",
+        "b2aa4c149a451d75fff16d0b97291dab06cb2788ebc44be3cfeb61b847446c2b",
+        "c61e5ce69c9892ee36602d6d31458f381750d52983fc471f874f95f57d9afeab",
+        "84832e66f3261737b84da806f62bc07dce03e3002bef412766faa3d123f066e1",
+        "ac694dd10970909bf1bfc6bd71f5e6c924b174a5ddf6529f5ba3b8e721724f9c",
+        "381b65eb3fa04c1c78e73d4488b7e0b02f0469e5bd8e222f84c7896410e966dd",
+        "0a5803ee986c48fb9b8c8d949ee6b4e8f48c2d81a94fb36bbf168d66753a0d41"
     ];
 
     let client = ZcashClient::new(
@@ -89,13 +83,11 @@ async fn zcash_client_get_transaction_test() {
 
     for txid_hex in txids_hex {
         let transaction = client
-            .get_transaction(&txid_hex.as_slice())
+            .get_transaction(&Hash::from_hex(&txid_hex).expect("Invalid txid hex"))
             .await
             .expect("get_transaction failed");
 
-        let mut expected_txid = transaction.hash().0;
-        expected_txid.reverse();
-
-        assert_eq!(expected_txid, txid_hex.as_slice());
+        let expected_txid = transaction.hash().0;
+        assert_eq!(expected_txid, Hash::from_hex(&txid_hex).expect("Invalid txid hex").0);
     }
 }
