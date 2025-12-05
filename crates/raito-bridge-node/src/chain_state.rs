@@ -99,7 +99,7 @@ impl ChainStateManager {
             }
             pow_target_history.push(current_target.clone());
 
-            // Epoch start time is the timestamp of the first block in each epoch.
+            // Added to match cairo code            
             let epoch_start_time = if block_height % BLOCKS_PER_EPOCH == 0 {
                 block_time
             } else {
