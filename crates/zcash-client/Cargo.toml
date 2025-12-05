@@ -27,3 +27,6 @@ backoff = { version = "0.4", features = ["futures", "tokio"] }
 
 # Logging
 tracing = { workspace = true } 
+
+# Hashing
+sha2 = "0.10"

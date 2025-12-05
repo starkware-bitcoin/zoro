@@ -5,15 +5,19 @@ use jsonrpsee::core::client::ClientT;
 use jsonrpsee::core::params::ArrayParams;
 use jsonrpsee::http_client::{HeaderMap, HeaderValue, HttpClient};
 use jsonrpsee::rpc_params;
-use zebra_chain::block::Header;
+use zebra_chain::block::{Block, Hash, Header, merkle::Root};
 use zebra_chain::transaction::Transaction;
-use zebra_chain::block::Hash;
 use zebra_chain::serialization::ZcashDeserialize;
+use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info};
+use sha2::{Sha256, Digest};
 pub mod serialize;
+pub mod merkle;
+
+pub use merkle::{MerkleTree, MerkleProof};
 
 /// Error types for Bitcoin RPC client operations
 #[derive(Error, Debug)]
@@ -42,6 +46,15 @@ pub enum ZcashClientError {
     /// Failed to convert block hash
     #[error("Failed to convert block hash: {0}")]
     InvalidBlockHash(String),
+    /// Failed to deserialize Zcash block
+    #[error("Failed to deserialize Zcash block: {0}")]
+    ZcashBlockDeserialize(zebra_chain::serialization::SerializationError),
+    /// Merkle root mismatch
+    #[error("Merkle root mismatch: expected {expected:?}, calculated {calculated:?}")]
+    MerkleRootMismatch {
+        expected: String,
+        calculated: String,
+    },
 }
 
 /// Default HTTP request timeout
@@ -163,6 +176,29 @@ impl ZcashClient {
         unimplemented!();
         // self.request("gettxoutproof", rpc_params![[txid.to_string()]])
         //     .await
+    }
+
+    /// Get block by hash
+    pub async fn get_block(&self, hash: &Hash) -> Result<Block, ZcashClientError> {
+        let block_hex: String = self
+            .request("getblock", rpc_params![hash.to_string(), 0])
+            .await?;
+        let block_bytes = hex::decode(block_hex)?;
+        let block = Block::zcash_deserialize(&mut block_bytes.as_slice())
+            .map_err(ZcashClientError::ZcashBlockDeserialize)?;
+        Ok(block)
+    }
+
+    pub async fn build_block_merkle_tree(&self, block_height: u32) -> Result<MerkleTree, ZcashClientError> {
+        let hash = self.get_block_hash(block_height).await?;
+        let block = self.get_block(&hash).await?;
+
+        MerkleTree::new(block.transactions.clone(), block.header.merkle_root).map_err(|e| {
+             ZcashClientError::MerkleRootMismatch {
+                expected: format!("{:?}", block.header.merkle_root),
+                calculated: e, // Ideally parse e properly, but string error from module is fine for now
+            }
+        })
     }
 
     /// Get current chain height
