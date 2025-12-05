@@ -8,8 +8,8 @@ use bzip2::write::BzEncoder;
 use bzip2::Compression;
 use std::io::Read;
 use tracing::info;
-use zebra_chain::transaction::Hash;
 use zcash_client::ZcashClient;
+use zebra_chain::transaction::Hash;
 
 use raito_spv_verify::{
     verify::ChainStateProof, verify_proof, CompressedSpvProof, TransactionInclusionProof,

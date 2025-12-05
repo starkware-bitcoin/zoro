@@ -1,6 +1,4 @@
-use hex::FromHex;
 use zcash_client::ZcashClient;
-use zebra_chain::block::Hash;
 #[tokio::main]
 async fn main() {
     let client = ZcashClient::new(

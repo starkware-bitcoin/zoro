@@ -1,9 +1,7 @@
 //! Work verification utilities for ensuring sufficient confirmations on top of a target block.
 
 use num_bigint::BigUint;
-use std::cmp::{max, min};
 use std::str::FromStr;
-use tracing::info;
 
 use crate::{proof::ChainState, verify::VerifierConfig};
 

@@ -11,7 +11,6 @@ use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
 
 use crate::proof::{BootloaderOutput, ChainState, TaskResult};
-use crate::work::verify_subchain_work;
 
 /// Configuration parameters controlling verification policies
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +152,7 @@ pub fn verify_chain_state(
     } = get_verification_output(&chain_state_proof.claim.public_data.public_memory);
 
     // Decode the bootloader hash
-    let bootloader_hash = format!("0x{}", hex::encode(&bootloader_hash.to_bytes_be()));
+    let bootloader_hash = format!("0x{}", hex::encode(bootloader_hash.to_bytes_be()));
 
     // Decode bootloader output from the raw output felts
     let BootloaderOutput {
@@ -165,8 +164,7 @@ pub fn verify_chain_state(
 
     if n_tasks != 1 {
         anyhow::bail!(
-            "Bootloader output: number of tasks must be 1, got {}",
-            n_tasks
+            "Bootloader output: number of tasks must be 1, got {n_tasks}"
         );
     }
     if task_output_size != config.task_output_size {
@@ -188,9 +186,7 @@ pub fn verify_chain_state(
     let expected_chain_state_hash = chain_state.blake2s_digest()?;
     if chain_state_hash != expected_chain_state_hash {
         anyhow::bail!(
-            "Chain state hash doesn't match the expected hash: {} != {}",
-            chain_state_hash,
-            expected_chain_state_hash
+            "Chain state hash doesn't match the expected hash: {chain_state_hash} != {expected_chain_state_hash}"
         );
     }
 
@@ -204,9 +200,7 @@ pub fn verify_chain_state(
     }
     if task_program_hash != prev_program_hash {
         anyhow::bail!(
-            "Previous program hash doesn't match the task result: {} != {}",
-            prev_program_hash,
-            task_program_hash
+            "Previous program hash doesn't match the task result: {prev_program_hash} != {task_program_hash}"
         );
     }
 
@@ -220,9 +214,7 @@ pub fn verify_chain_state(
     }
     if bootloader_hash != prev_bootloader_hash {
         anyhow::bail!(
-            "Previous bootloader hash doesn't match the verification data: {} != {}",
-            bootloader_hash,
-            prev_bootloader_hash
+            "Previous bootloader hash doesn't match the verification data: {bootloader_hash} != {prev_bootloader_hash}"
         );
     }
 

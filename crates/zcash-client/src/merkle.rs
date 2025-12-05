@@ -30,8 +30,7 @@ impl MerkleTree {
 
         if calculated_root != expected_root {
             return Err(format!(
-                "Merkle root mismatch: expected {:?}, calculated {:?}",
-                expected_root, calculated_root
+                "Merkle root mismatch: expected {expected_root:?}, calculated {calculated_root:?}"
             ));
         }
 
