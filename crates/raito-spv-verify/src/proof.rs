@@ -3,7 +3,6 @@
 
 
 use cairo_air::CairoProof;
-use raito_spv_mmr::block_mmr::BlockInclusionProof;
 use stwo_prover::core::vcs::blake2_hash::Blake2sHasher;
 use zcash_client::serialize::{deserialize_header, deserialize_transaction, serialize_header, serialize_transaction};
 use serde::{Deserialize, Serialize};
@@ -41,7 +40,7 @@ pub struct CompressedSpvProof {
     #[serde(serialize_with = "serialize_header", deserialize_with = "deserialize_header")]
     pub block_header: Header,
     /// MMR inclusion proof for the block header
-    pub block_header_proof: BlockInclusionProof,
+    pub block_header_proof: Vec<u8>, // ToDo: adapt for fly client
     /// The transaction to be proven
     #[serde(serialize_with = "serialize_transaction", deserialize_with = "deserialize_transaction")]
     pub transaction: Transaction,

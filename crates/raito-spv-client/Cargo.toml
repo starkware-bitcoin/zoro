@@ -10,12 +10,9 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 
-raito-spv-mmr = { path = "../raito-spv-mmr" }
 raito-spv-verify = { path = "../raito-spv-verify" }
 zcash-client = { path = "../zcash-client" }
 
-# Bitcoin RPC and types
-bitcoin = { workspace = true }
 num-bigint = "0.4.3"
 
 # CLI and env

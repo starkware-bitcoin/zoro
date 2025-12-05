@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use accumulators::store::StoreError;
 use async_trait::async_trait;
 use hex::{FromHex, ToHex};
 use raito_spv_verify::{proof::Target, ChainState};
@@ -15,19 +14,24 @@ const MAX_TIMESTAMP_HISTORY: usize = 28;
 
 #[async_trait]
 pub trait ChainStateStore: Send + Sync {
-    async fn add_block_header(&self, height: u32, block_header: &Header) -> Result<(), StoreError>;
+    async fn add_block_header(
+        &self,
+        height: u32,
+        block_header: &Header,
+    ) -> Result<(), crate::store::StoreError>;
     async fn get_block_headers(
         &self,
         start_height: u32,
         num_blocks: u32,
-    ) -> Result<Vec<Header>, StoreError>;
-    async fn get_block_height(&self, block_hash: &Hash) -> Result<u32, StoreError>;
+    ) -> Result<Vec<Header>, crate::store::StoreError>;
+    async fn get_block_height(&self, block_hash: &Hash) -> Result<u32, crate::store::StoreError>;
     async fn add_chain_state(
         &self,
         height: u32,
         chain_state: &ChainState,
-    ) -> Result<(), StoreError>;
-    async fn get_chain_state(&self, height: u32) -> Result<ChainState, StoreError>;
+    ) -> Result<(), crate::store::StoreError>;
+    async fn get_chain_state(&self, height: u32) -> Result<ChainState, crate::store::StoreError>;
+    async fn get_latest_chain_state_height(&self) -> Result<u32, crate::store::StoreError>;
 }
 
 pub struct ChainStateManager {

@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::path::Path;
 
-use accumulators::store::{sqlite::SQLiteStore, Store as AccumulatorsStore, StoreError};
 use async_trait::async_trait;
 use raito_spv_verify::ChainState;
+use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
     SqliteTransactionManager,
 };
-use sqlx::{Row, TransactionManager};
+use sqlx::{Acquire, Pool, Row, Sqlite, SqliteConnection, SqlitePool, TransactionManager};
+use thiserror::Error;
 use tokio::fs;
 use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
@@ -17,6 +18,210 @@ use zebra_chain::serialization::ZcashDeserialize;
 use zebra_chain::serialization::ZcashSerialize;
 
 use crate::chain_state::ChainStateStore;
+
+/// An error that can occur when using the store.
+#[derive(Error, Debug)]
+pub enum StoreError {
+    #[error("Fail to get value from store")]
+    GetError,
+    #[error("SQLite error: {0}")]
+    SQLite(#[from] sqlx::Error),
+    #[error("Custom error: {0:?}")]
+    Custom(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+/// A key-value store backed by SQLite.
+#[derive(Debug)]
+pub struct SQLiteStore {
+    id: Option<String>,
+    pool: Pool<Sqlite>,
+    atomic_set_many: bool,
+}
+
+// SQLite's default maximum number of variables per statement is 999.
+// We use a smaller number to be safe.
+const MAX_VARIABLE_NUMBER: usize = 900;
+
+impl SQLiteStore {
+    /// Create a new SQLite store with externally created pool.
+    pub fn with_pool(pool: Pool<Sqlite>, id: Option<String>) -> Self {
+        SQLiteStore {
+            id,
+            pool,
+            atomic_set_many: false,
+        }
+    }
+
+    /// Create a new SQLite store from a file path.
+    pub async fn new(
+        path: &str,
+        create_file_if_not_exists: Option<bool>,
+        id: Option<&str>,
+    ) -> Result<Self, sqlx::Error> {
+        let pool = if let Some(create_file_if_not_exists) = create_file_if_not_exists {
+            let options = SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(create_file_if_not_exists);
+            SqlitePool::connect_with(options).await?
+        } else {
+            SqlitePool::connect(path).await?
+        };
+
+        let store = SQLiteStore {
+            id: id.map(|v| v.to_string()),
+            pool,
+            atomic_set_many: true,
+        };
+        store.init().await?;
+        Ok(store)
+    }
+
+    /// Acquire a connection from the pool.
+    /// NOTE: if there's no available connection this function will fail after acquire timeout.
+    /// Configure it via sqlite options.
+    pub async fn acquire_connection(&self) -> Result<PoolConnection<Sqlite>, sqlx::Error> {
+        self.pool.acquire().await
+    }
+
+    /// Initialize the underlying key-value table.
+    pub async fn init(&self) -> Result<(), sqlx::Error> {
+        let mut conn = self.acquire_connection().await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS store (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );"#,
+        )
+        .execute(conn.deref_mut())
+        .await?;
+        Ok(())
+    }
+
+    pub fn id(&self) -> String {
+        self.id.clone().unwrap_or_default()
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let mut conn = self.acquire_connection().await?;
+
+        let row = sqlx::query("SELECT value FROM store WHERE key = ?")
+            .bind(key)
+            .fetch_optional(conn.deref_mut())
+            .await?;
+
+        if let Some(row) = row {
+            let value: String = row.try_get("value")?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_many(&self, keys: Vec<&str>) -> Result<HashMap<String, String>, StoreError> {
+        let mut conn = self.acquire_connection().await?;
+        let mut map = HashMap::new();
+
+        for key_chunk in keys.chunks(MAX_VARIABLE_NUMBER) {
+            let placeholders = key_chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let query_statement =
+                format!("SELECT key, value FROM store WHERE key IN ({placeholders})");
+
+            let mut query = sqlx::query(&query_statement);
+
+            for key in key_chunk {
+                query = query.bind(*key);
+            }
+
+            let rows = query.fetch_all(conn.deref_mut()).await?;
+            for row in rows {
+                let key: String = row.get("key");
+                let value: String = row.get("value");
+                map.insert(key, value);
+            }
+        }
+
+        Ok(map)
+    }
+
+    pub async fn set(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let mut conn = self.acquire_connection().await?;
+        sqlx::query("INSERT OR REPLACE INTO store (key, value) VALUES (?, ?)")
+            .bind(key)
+            .bind(value)
+            .execute(conn.deref_mut())
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn set_many(&self, entries: HashMap<String, String>) -> Result<(), StoreError> {
+        let mut conn = self.acquire_connection().await?;
+        match self.atomic_set_many {
+            true => {
+                let mut tx = conn.begin().await?;
+                set_many(tx.deref_mut(), entries).await?;
+                tx.commit().await.map_err(StoreError::SQLite)
+            }
+            false => set_many(conn.deref_mut(), entries).await,
+        }
+    }
+
+    pub async fn delete(&self, key: &str) -> Result<(), StoreError> {
+        let mut conn = self.acquire_connection().await?;
+        sqlx::query("DELETE FROM store WHERE key = ?")
+            .bind(key)
+            .execute(conn.deref_mut())
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn delete_many(&self, keys: Vec<&str>) -> Result<(), StoreError> {
+        let mut conn = self.acquire_connection().await?;
+
+        for key_chunk in keys.chunks(MAX_VARIABLE_NUMBER) {
+            let placeholders = key_chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            let query_statement = format!("DELETE FROM store WHERE key IN ({placeholders})");
+
+            let mut query = sqlx::query(&query_statement);
+
+            for key in key_chunk {
+                query = query.bind(*key);
+            }
+
+            query.execute(conn.deref_mut()).await?;
+        }
+
+        Ok(())
+    }
+}
+
+async fn set_many(
+    executor: &mut SqliteConnection,
+    entries: HashMap<String, String>,
+) -> Result<(), StoreError> {
+    for entry_chunk in entries
+        .iter()
+        .collect::<Vec<_>>()
+        .chunks(MAX_VARIABLE_NUMBER)
+    {
+        let mut query = String::from("INSERT OR REPLACE INTO store (key, value) VALUES ");
+        let placeholders = entry_chunk
+            .iter()
+            .map(|_| "(?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        query.push_str(&placeholders);
+
+        let mut sqlx_query = sqlx::query(&query);
+        for (key, value) in entry_chunk {
+            sqlx_query = sqlx_query.bind(key).bind(value);
+        }
+
+        sqlx_query.execute(&mut *executor).await?;
+    }
+    Ok(())
+}
 
 /// SQLite busy timeout in milliseconds
 const SQLITE_BUSY_TIMEOUT: &str = "5000";
@@ -186,6 +391,14 @@ impl ChainStateStore for AppStore {
         bincode::deserialize::<ChainState>(&data).map_err(|e| StoreError::Custom(Box::new(e)))
     }
 
+    async fn get_latest_chain_state_height(&self) -> Result<u32, StoreError> {
+        let mut conn = self.0.acquire_connection().await?;
+        let row = sqlx::query("SELECT height FROM chain_states ORDER BY height DESC LIMIT 1")
+            .fetch_optional(conn.deref_mut())
+            .await?;
+        row.map(|row| row.get("height")).ok_or(StoreError::GetError)
+    }
+
     async fn add_chain_state(
         &self,
         height: u32,
@@ -199,30 +412,5 @@ impl ChainStateStore for AppStore {
             .execute(conn.deref_mut())
             .await?;
         Ok(())
-    }
-}
-
-#[async_trait]
-impl AccumulatorsStore for AppStore {
-    fn id(&self) -> String {
-        self.0.id()
-    }
-    async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
-        self.0.get(key).await
-    }
-    async fn get_many(&self, keys: Vec<&str>) -> Result<HashMap<String, String>, StoreError> {
-        self.0.get_many(keys).await
-    }
-    async fn set(&self, key: &str, value: &str) -> Result<(), StoreError> {
-        self.0.set(key, value).await
-    }
-    async fn set_many(&self, entries: HashMap<String, String>) -> Result<(), StoreError> {
-        self.0.set_many(entries).await
-    }
-    async fn delete(&self, key: &str) -> Result<(), StoreError> {
-        self.0.delete(key).await
-    }
-    async fn delete_many(&self, keys: Vec<&str>) -> Result<(), StoreError> {
-        self.0.delete_many(keys).await
     }
 }

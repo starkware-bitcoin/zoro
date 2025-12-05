@@ -3,7 +3,6 @@
 
 use cairo_air::utils::{get_verification_output, VerificationOutput};
 use cairo_air::{CairoProof, PreProcessedTraceVariant};
-use raito_spv_mmr::block_mmr::{BlockInclusionProof, BlockMMR};
 use serde::{Deserialize, Serialize};
 use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
@@ -68,32 +67,34 @@ pub async fn verify_proof(
         transaction_proof,
     } = proof;
 
-    // Sanity checks
-    if !dev && block_header_proof.leaf_count as u32 != chain_state.block_height + 1 {
-        anyhow::bail!("Mismatched chain height and MMR size");
-    }
+    unimplemented!();
 
-    let block_height = block_header_proof.leaf_index as u32;
+    // // Sanity checks
+    // if !dev && block_header_proof.leaf_count as u32 != chain_state.block_height + 1 {
+    //     anyhow::bail!("Mismatched chain height and MMR size");
+    // }
 
-    info!("Verifying transaction inclusion proof ...");
-    verify_transaction(&transaction, &block_header, transaction_proof)?;
+    // let block_height = block_header_proof.leaf_index as u32;
 
-    info!("Verifying block inclusion proof ...");
-    let block_mmr_root_0 = verify_block_header(&block_header, block_header_proof).await?;
+    // info!("Verifying transaction inclusion proof ...");
+    // verify_transaction(&transaction, &block_header, transaction_proof)?;
 
-    info!("Verifying chain state proof ...");
-    let block_mmr_hash_1 = verify_chain_state(&chain_state, chain_state_proof, &config)?;
+    // info!("Verifying block inclusion proof ...");
+    // let block_mmr_root_0 = verify_block_header(&block_header, block_header_proof).await?;
 
-    if !dev && block_mmr_root_0 != block_mmr_hash_1 {
-        anyhow::bail!("Mismatched block MMR roots");
-    }
+    // info!("Verifying chain state proof ...");
+    // let block_mmr_hash_1 = verify_chain_state(&chain_state, chain_state_proof, &config)?;
 
-    info!("Verifying subchain work ...");
-    verify_subchain_work(block_height, &chain_state, &config)?;
+    // if !dev && block_mmr_root_0 != block_mmr_hash_1 {
+    //     anyhow::bail!("Mismatched block MMR roots");
+    // }
 
-    info!("Verification successful!");
+    // info!("Verifying subchain work ...");
+    // verify_subchain_work(block_height, &chain_state, &config)?;
 
-    Ok(())
+    // info!("Verification successful!");
+
+    // Ok(())
 }
 
 /// Verify that `transaction` is included in `block_header` using the provided Merkle proof.
@@ -129,7 +130,7 @@ pub fn verify_transaction(
 /// Returns the computed block MMR root on success.
 pub async fn verify_block_header(
     block_header: &Header,
-    block_header_proof: BlockInclusionProof,
+    block_header_proof: Vec<u8>, // ToDo: adapt for fly client
 ) -> anyhow::Result<String> {
     unimplemented!();
     // TODO: Add flyclient verification

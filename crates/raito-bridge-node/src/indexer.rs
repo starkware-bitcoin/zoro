@@ -2,15 +2,15 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use accumulators::hasher::stark_blake::StarkBlakeHasher;
-use raito_spv_mmr::block_mmr::BlockMMR;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
 use zcash_client::ZcashClient;
 
-use crate::{chain_state::ChainStateManager, store::AppStore};
-
+use crate::{
+    chain_state::{ChainStateManager, ChainStateStore},
+    store::AppStore,
+};
 /// Bitcoin block indexer that builds MMR accumulator and generates sparse roots
 pub struct Indexer {
     /// Indexer configuration
@@ -53,12 +53,8 @@ impl Indexer {
         let store = Arc::new(
             AppStore::single_atomic_writer(&self.config.mmr_db_path, mmr_id.clone()).await?,
         );
-        let hasher = Arc::new(StarkBlakeHasher::default());
-        let mut mmr = BlockMMR::new(store.clone(), hasher, mmr_id);
-        info!("MMR loaded from {}", self.config.mmr_db_path.display());
 
-        let mut next_block_height = mmr.get_block_count().await?;
-        info!("Current MMR blocks count: {}", next_block_height);
+        let mut next_block_height = store.get_latest_chain_state_height().await? + 1;
 
         let mut chain_state_mgr =
             ChainStateManager::restore(store.clone(), next_block_height).await?;
@@ -70,7 +66,6 @@ impl Indexer {
                     match res {
                         Ok((block_header, block_hash)) => {
                             store.begin().await?;
-                            mmr.add_block_header(&block_header).await.map_err(|e| anyhow::anyhow!("Failed to add block header to MMR: {}", e))?;
                             chain_state_mgr.update(next_block_height, &block_header).await.map_err(|e| anyhow::anyhow!("Failed to update chain state: {}", e))?;
                             store.commit().await?;
                             info!("Block #{} {} processed", next_block_height, block_hash);

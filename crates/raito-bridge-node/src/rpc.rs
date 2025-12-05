@@ -1,6 +1,5 @@
 //! HTTP RPC server providing REST endpoints for MMR proof generation and block count queries.
 
-use accumulators::hasher::stark_blake::StarkBlakeHasher;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info};
@@ -17,10 +16,6 @@ use std::{path::PathBuf, str::FromStr, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use zebra_chain::block::Header;
 
-use raito_spv_mmr::{
-    block_mmr::{BlockInclusionProof, BlockMMR},
-    sparse_roots::SparseRoots,
-};
 use raito_spv_verify::{ChainState, TransactionInclusionProof};
 
 use crate::{chain_state::ChainStateStore, store::AppStore};
@@ -61,7 +56,6 @@ pub struct RpcServer {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    mmr: Arc<BlockMMR>,
     store: Arc<AppStore>,
     bitcoin_client: Arc<ZcashClient>,
 }
@@ -73,12 +67,9 @@ impl AppState {
             &config.mmr_db_path,
             mmr_id.clone(),
         ));
-        let hasher = StarkBlakeHasher::default();
-        let mmr = BlockMMR::new(store.clone(), Arc::new(hasher), mmr_id);
         let bitcoin_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {
-            mmr: Arc::new(mmr),
             bitcoin_client: Arc::new(bitcoin_client),
             store: store.clone(),
         })
@@ -148,19 +139,20 @@ pub async fn generate_proof(
     State(state): State<AppState>,
     Path(block_height): Path<u32>,
     Query(query): Query<ChainHeightQuery>,
-) -> Result<Json<BlockInclusionProof>, StatusCode> {
-    let proof = state
-        .mmr
-        .generate_proof(block_height, query.chain_height)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to generate block proof for height {}: {}",
-                block_height, e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    Ok(Json(proof))
+) -> Result<Json<()>, StatusCode> {
+    unimplemented!();
+    // let proof = state
+    //     .mmr
+    //     .generate_proof(block_height, query.chain_height)
+    //     .await
+    //     .map_err(|e| {
+    //         error!(
+    //             "Failed to generate block proof for height {}: {}",
+    //             block_height, e
+    //         );
+    //         StatusCode::INTERNAL_SERVER_ERROR
+    //     })?;
+    // Ok(Json(proof))
 }
 
 /// Get the roots of the MMR: latest or for a given block count (optional)
@@ -174,31 +166,36 @@ pub async fn generate_proof(
 pub async fn get_roots(
     State(state): State<AppState>,
     Query(query): Query<ChainHeightQuery>,
-) -> Result<Json<SparseRoots>, StatusCode> {
-    let sparse_roots = state
-        .mmr
-        .get_sparse_roots(query.chain_height)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get sparse roots for chain height {:?}: {}",
-                query.chain_height, e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    Ok(Json(sparse_roots))
+) -> Result<Json<()>, StatusCode> {
+    unimplemented!();
+    // let sparse_roots = state
+    //     .mmr
+    //     .get_sparse_roots(query.chain_height)
+    //     .await
+    //     .map_err(|e| {
+    //         error!(
+    //             "Failed to get sparse roots for chain height {:?}: {}",
+    //             query.chain_height, e
+    //         );
+    //         StatusCode::INTERNAL_SERVER_ERROR
+    //     })?;
+    // Ok(Json(sparse_roots))
 }
 
-/// Get the current head (latest processed block height) from the MMR
+/// Get the current head (latest processed block height) from the DB
 ///
 /// # Returns
 /// * `Json<u32>` - The current block count in JSON format
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If getting block count fails
 pub async fn get_head(State(state): State<AppState>) -> Result<Json<u32>, StatusCode> {
-    let block_count = state.mmr.get_block_count().await.map_err(|e| {
-        error!("Failed to get block count: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let block_count = state
+        .store
+        .get_latest_chain_state_height()
+        .await
+        .map_err(|e| {
+            error!("Failed to get block count: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     Ok(Json(block_count - 1))
 }
 

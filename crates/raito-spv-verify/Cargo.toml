@@ -6,9 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 
-# Core SPV functionality
-raito-spv-mmr = { path = "../raito-spv-mmr" }
-
 # Zcash types
 zebra-chain.workspace = true
 
