@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use zebra_chain::block::merkle::Root;
+use zebra_chain::transaction::Hash;
 use zebra_chain::transaction::Transaction;
-use sha2::{Sha256, Digest};
 
 /// Represents a block's transaction Merkle tree
 #[derive(Debug)]
@@ -11,7 +13,7 @@ pub struct MerkleTree {
 }
 
 /// A Merkle inclusion proof for a transaction
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MerkleProof {
     /// The root of the Merkle tree
     pub root: Root,
@@ -39,24 +41,34 @@ impl MerkleTree {
         })
     }
 
+    pub fn get_transaction_index(&self, tx_hash: Hash) -> Result<usize, String> {
+        for (i, tx) in self.transactions.iter().enumerate() {
+            if tx.hash() == tx_hash {
+                return Ok(i);
+            }
+        }
+        Err("Transaction not found".to_string())
+    }
+
     /// Generates a Merkle inclusion proof for the transaction at the given index
     pub fn generate_proof(&self, tx_index: usize) -> Result<MerkleProof, String> {
         if tx_index >= self.transactions.len() {
             return Err("Transaction index out of bounds".to_string());
         }
 
-        let mut current_layer: Vec<[u8; 32]> = self.transactions
+        let mut current_layer: Vec<[u8; 32]> = self
+            .transactions
             .iter()
             .map(|tx| tx.hash().into())
             .collect();
-        
+
         let mut path = Vec::new();
         let mut current_index = tx_index;
 
         // Continue until we reach the root (layer size 1)
         while current_layer.len() > 1 {
             let is_right_child = current_index % 2 != 0;
-            
+
             let sibling_index = if is_right_child {
                 current_index - 1
             } else {
@@ -78,7 +90,7 @@ impl MerkleTree {
                     }
                 })
                 .collect();
-            
+
             current_index /= 2;
         }
 
@@ -102,11 +114,11 @@ impl MerkleProof {
             } else {
                 (*sibling, current)
             };
-            
+
             current = double_sha256(&left, &right);
             index /= 2;
         }
-        
+
         Root(current) == self.root
     }
 }
@@ -117,7 +129,7 @@ fn double_sha256(l: &[u8; 32], r: &[u8; 32]) -> [u8; 32] {
     hasher.update(l);
     hasher.update(r);
     let h1 = hasher.finalize();
-    
+
     let mut hasher2 = Sha256::new();
     hasher2.update(h1);
     hasher2.finalize().into()

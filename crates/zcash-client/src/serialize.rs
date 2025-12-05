@@ -1,7 +1,5 @@
-
-
-use serde::{Deserialize, Deserializer, Serializer};
 use serde::de::Error as SerdeError;
+use serde::{Deserialize, Deserializer, Serializer};
 use zebra_chain::block::Header;
 use zebra_chain::serialization::ZcashDeserialize;
 use zebra_chain::serialization::ZcashSerialize;
@@ -33,7 +31,8 @@ where
     S: Serializer,
 {
     let mut buffer = Vec::new();
-    header.zcash_serialize(&mut buffer)
+    header
+        .zcash_serialize(&mut buffer)
         .map_err(serde::ser::Error::custom)?;
     let hex_string = hex::encode(buffer);
     serializer.serialize_str(&hex_string)

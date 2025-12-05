@@ -5,19 +5,20 @@ use jsonrpsee::core::client::ClientT;
 use jsonrpsee::core::params::ArrayParams;
 use jsonrpsee::http_client::{HeaderMap, HeaderValue, HttpClient};
 use jsonrpsee::rpc_params;
-use zebra_chain::block::{Block, Hash, Header, merkle::Root};
-use zebra_chain::transaction::Transaction;
-use zebra_chain::serialization::ZcashDeserialize;
-use std::sync::Arc;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info};
-use sha2::{Sha256, Digest};
-pub mod serialize;
+use zebra_chain::block::{merkle::Root, Block, Header};
+use zebra_chain::serialization::ZcashDeserialize;
+use zebra_chain::transaction::{Hash, Transaction};
 pub mod merkle;
+pub mod serialize;
 
-pub use merkle::{MerkleTree, MerkleProof};
+pub use merkle::{MerkleProof, MerkleTree};
 
 /// Error types for Bitcoin RPC client operations
 #[derive(Error, Debug)]
@@ -93,7 +94,7 @@ impl ZcashClient {
         Ok(Self {
             client,
             backoff: backoff.clone(),
-            chain_height: 0
+            chain_height: 0,
         })
     }
 
@@ -123,10 +124,7 @@ impl ZcashClient {
     }
 
     /// Get block header by hash
-    pub async fn get_block_header(
-        &self,
-        hash: &Hash,
-    ) -> Result<Header, ZcashClientError> {
+    pub async fn get_block_header(&self, hash: &Hash) -> Result<Header, ZcashClientError> {
         self.request::<String>("getblockheader", rpc_params![hash.to_string(), false])
             .await
             .and_then(|header_hex| {
@@ -155,11 +153,30 @@ impl ZcashClient {
         Ok((header, hash))
     }
 
+    pub async fn get_transaction_block_height(&self, txid: &Hash) -> Result<u32, ZcashClientError> {
+        let tx: Value = self
+            .request("getrawtransaction", rpc_params![txid.to_string(), 1])
+            .await?;
+
+        let block_height = tx
+            .get("height")
+            .and_then(|h| h.as_u64())
+            .map(|h| h as u32)
+            .ok_or_else(|| {
+                ZcashClientError::ZcashBlockHeaderRead(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing or invalid block height in getrawtransaction response",
+                ))
+            })?;
+
+        Ok(block_height)
+    }
+
     /// Get transaction by txid and hash of the block containing the transaction
-    pub async fn get_transaction(&self, txid: &[u8]) -> Result<Transaction, ZcashClientError> {
+    pub async fn get_transaction(&self, txid: &Hash) -> Result<Transaction, ZcashClientError> {
         // get raw tx from rpc in json mode
         let tx: String = self
-            .request("getrawtransaction", rpc_params![hex::encode(txid)])
+            .request("getrawtransaction", rpc_params![txid.to_string()])
             .await?;
 
         let tx_bytes = hex::decode(tx).unwrap();
@@ -171,7 +188,7 @@ impl ZcashClient {
     /// Get transaction inclusion proof
     pub async fn get_transaction_inclusion_proof(
         &self,
-        _txid: &[u8]
+        _txid: &[u8],
     ) -> Result<(), ZcashClientError> {
         unimplemented!();
         // self.request("gettxoutproof", rpc_params![[txid.to_string()]])
@@ -189,12 +206,16 @@ impl ZcashClient {
         Ok(block)
     }
 
-    pub async fn build_block_merkle_tree(&self, block_height: u32) -> Result<MerkleTree, ZcashClientError> {
+    /// Build the tx merkle tree of a given block number. This is required for generating the tx inclusion proof.
+    pub async fn build_block_merkle_tree(
+        &self,
+        block_height: u32,
+    ) -> Result<MerkleTree, ZcashClientError> {
         let hash = self.get_block_hash(block_height).await?;
         let block = self.get_block(&hash).await?;
 
         MerkleTree::new(block.transactions.clone(), block.header.merkle_root).map_err(|e| {
-             ZcashClientError::MerkleRootMismatch {
+            ZcashClientError::MerkleRootMismatch {
                 expected: format!("{:?}", block.header.merkle_root),
                 calculated: e, // Ideally parse e properly, but string error from module is fine for now
             }
