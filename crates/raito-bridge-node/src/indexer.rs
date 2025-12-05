@@ -66,7 +66,7 @@ impl Indexer {
                     match res {
                         Ok((block_header, block_hash)) => {
                             store.begin().await?;
-                            chain_state_mgr.update(next_block_height, &block_header).await.map_err(|e| anyhow::anyhow!("Failed to update chain state: {}", e))?;
+                            chain_state_mgr.update(next_block_height, &block_header).await.map_err(|e| anyhow::anyhow!("Failed to update chain state: {e}"))?;
                             store.commit().await?;
                             info!("Block #{} {} processed", next_block_height, block_hash);
                             next_block_height += 1;

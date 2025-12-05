@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use zebra_chain::block::Header;
 
@@ -57,7 +57,7 @@ pub struct RpcServer {
 #[derive(Debug, Clone)]
 pub struct AppState {
     store: Arc<AppStore>,
-    bitcoin_client: Arc<ZcashClient>,
+    zcash_client: Arc<ZcashClient>,
 }
 
 impl AppState {
@@ -67,10 +67,10 @@ impl AppState {
             &config.mmr_db_path,
             mmr_id.clone(),
         ));
-        let bitcoin_client =
+        let zcash_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {
-            bitcoin_client: Arc::new(bitcoin_client),
+            zcash_client: Arc::new(zcash_client),
             store: store.clone(),
         })
     }
@@ -89,7 +89,7 @@ impl RpcServer {
 
         let app_state = AppState::new(self.config.clone())
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         let app = Router::new()
             .route("/block-inclusion-proof/:block_height", get(generate_proof))
@@ -136,9 +136,9 @@ impl RpcServer {
 /// * `Json<InclusionProof>` - The inclusion proof in JSON format
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If proof generation fails
 pub async fn generate_proof(
-    State(state): State<AppState>,
-    Path(block_height): Path<u32>,
-    Query(query): Query<ChainHeightQuery>,
+    State(_state): State<AppState>,
+    Path(_block_height): Path<u32>,
+    Query(_query): Query<ChainHeightQuery>,
 ) -> Result<Json<()>, StatusCode> {
     unimplemented!();
     // let proof = state
@@ -164,8 +164,8 @@ pub async fn generate_proof(
 /// * `Json<SparseRoots>` - The sparse roots in JSON format
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If getting roots fails
 pub async fn get_roots(
-    State(state): State<AppState>,
-    Query(query): Query<ChainHeightQuery>,
+    State(_state): State<AppState>,
+    Query(_query): Query<ChainHeightQuery>,
 ) -> Result<Json<()>, StatusCode> {
     unimplemented!();
     // let sparse_roots = state
@@ -263,8 +263,8 @@ pub async fn get_block_headers(
 /// * `StatusCode::BAD_REQUEST` - If the transaction ID is invalid
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If proof generation fails
 pub async fn get_transaction_proof(
-    State(state): State<AppState>,
-    Path(tx_id): Path<String>,
+    State(_state): State<AppState>,
+    Path(_tx_id): Path<String>,
 ) -> Result<Json<TransactionInclusionProof>, StatusCode> {
     unimplemented!();
     // let txid = bitcoin::Txid::from_str(&tx_id).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -272,7 +272,7 @@ pub async fn get_transaction_proof(
     //     header: block_header,
     //     txn,
     // } = state
-    //     .bitcoin_client
+    //     .zcash_client
     //     .get_transaction_inclusion_proof(&txid)
     //     .await
     //     .map_err(|e| {
@@ -297,7 +297,7 @@ pub async fn get_transaction_proof(
     //     })?;
 
     // let transaction = state
-    //     .bitcoin_client
+    //     .zcash_client
     //     .get_transaction(&txid, &block_hash)
     //     .await
     //     .map_err(|e| {
