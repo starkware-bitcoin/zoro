@@ -9,13 +9,16 @@ zoro-spv-verify = { path = "../zoro-spv-verify" }
 
 # Zcash types
 zebra-chain.workspace = true
-
 # Async runtime
 tokio.workspace = true
 async-trait.workspace = true
 # Web framework
 axum = "0.7"
-tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
+tower-http = { version = "0.5", features = [
+    "trace",
+    "cors",
+    "compression-gzip",
+] }
 
 # Storage
 sqlx.workspace = true

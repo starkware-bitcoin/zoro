@@ -10,9 +10,9 @@ use serde_json::Value;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{debug, info};
-use zebra_chain::block::{Block, Header};
+use zebra_chain::block::{Block, Hash as BlockHash, Header};
 use zebra_chain::serialization::ZcashDeserialize;
-use zebra_chain::transaction::{Hash, Transaction};
+use zebra_chain::transaction::{Hash as TxHash, Transaction};
 pub mod merkle;
 pub mod serialize;
 
@@ -111,18 +111,18 @@ impl ZcashClient {
     }
 
     /// Get block hash by height
-    pub async fn get_block_hash(&self, height: u32) -> Result<Hash, ZcashClientError> {
+    pub async fn get_block_hash(&self, height: u32) -> Result<BlockHash, ZcashClientError> {
         self.request::<String>("getblockhash", rpc_params![height])
             .await
             .and_then(|s| {
                 let mut bytes = hex::decode(&s)?;
                 bytes.reverse();
-                Hash::zcash_deserialize(&mut bytes.as_slice()).map_err(Into::into)
+                BlockHash::zcash_deserialize(&mut bytes.as_slice()).map_err(Into::into)
             })
     }
 
     /// Get block header by hash
-    pub async fn get_block_header(&self, hash: &Hash) -> Result<Header, ZcashClientError> {
+    pub async fn get_block_header(&self, hash: &BlockHash) -> Result<Header, ZcashClientError> {
         self.request::<String>("getblockheader", rpc_params![hash.to_string(), false])
             .await
             .and_then(|header_hex| {
@@ -133,7 +133,7 @@ impl ZcashClient {
     }
 
     /// Get block height by hash
-    pub async fn get_block_height(&self, hash: &Hash) -> Result<u32, ZcashClientError> {
+    pub async fn get_block_height(&self, hash: &BlockHash) -> Result<u32, ZcashClientError> {
         let header_info: serde_json::Value = self
             .request("getblockheader", rpc_params![hash.to_string(), true])
             .await?;
@@ -145,13 +145,13 @@ impl ZcashClient {
     pub async fn get_block_header_by_height(
         &self,
         height: u32,
-    ) -> Result<(Header, Hash), ZcashClientError> {
+    ) -> Result<(Header, BlockHash), ZcashClientError> {
         let hash = self.get_block_hash(height).await?;
         let header = self.get_block_header(&hash).await?;
         Ok((header, hash))
     }
 
-    pub async fn get_transaction_block_height(&self, txid: &Hash) -> Result<u32, ZcashClientError> {
+    pub async fn get_transaction_block_height(&self, txid: &TxHash) -> Result<u32, ZcashClientError> {
         let tx: Value = self
             .request("getrawtransaction", rpc_params![txid.to_string(), 1])
             .await?;
@@ -171,7 +171,7 @@ impl ZcashClient {
     }
 
     /// Get transaction by txid and hash of the block containing the transaction
-    pub async fn get_transaction(&self, txid: &Hash) -> Result<Transaction, ZcashClientError> {
+    pub async fn get_transaction(&self, txid: &TxHash) -> Result<Transaction, ZcashClientError> {
         // get raw tx from rpc in json mode
         let tx: String = self
             .request("getrawtransaction", rpc_params![txid.to_string()])
@@ -194,7 +194,7 @@ impl ZcashClient {
     }
 
     /// Get block by hash
-    pub async fn get_block(&self, hash: &Hash) -> Result<Block, ZcashClientError> {
+    pub async fn get_block(&self, hash: &BlockHash) -> Result<Block, ZcashClientError> {
         let block_hex: String = self
             .request("getblock", rpc_params![hash.to_string(), 0])
             .await?;
@@ -232,7 +232,7 @@ impl ZcashClient {
         &mut self,
         height: u32,
         lag: u32,
-    ) -> Result<(Header, Hash), ZcashClientError> {
+    ) -> Result<(Header, BlockHash), ZcashClientError> {
         while height > self.chain_height {
             self.chain_height = self.get_chain_height().await?.saturating_sub(lag);
             if height <= self.chain_height {
@@ -243,6 +243,51 @@ impl ZcashClient {
             }
         }
         self.get_block_header_by_height(height).await
+    }
+
+    /// Get block data needed for FlyClient MMR (sapling root and sapling tx count)
+    pub async fn get_block_flyclient_data(
+        &self,
+        height: u32,
+    ) -> Result<([u8; 32], u64), ZcashClientError> {
+        let hash = self.get_block_hash(height).await?;
+        let blk: Value = self
+            .request("getblock", rpc_params![hash.to_string(), 2])
+            .await?;
+
+        // Extract finalsaplingroot (little-endian in RPC, we need to reverse)
+        let sapling_root_hex = blk["finalsaplingroot"]
+            .as_str()
+            .ok_or_else(|| {
+                ZcashClientError::ZcashBlockHeaderRead(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing finalsaplingroot in getblock response",
+                ))
+            })?;
+        let mut sapling_root = [0u8; 32];
+        let decoded = hex::decode(sapling_root_hex)?;
+        sapling_root.copy_from_slice(&decoded);
+        sapling_root.reverse();
+
+        // Count sapling transactions (those with shielded spends or outputs)
+        let sapling_tx = blk["tx"]
+            .as_array()
+            .map(|txs| {
+                txs.iter()
+                    .filter(|tx| {
+                        tx.get("vShieldedSpend")
+                            .and_then(|v| v.as_array())
+                            .map_or(false, |a| !a.is_empty())
+                            || tx
+                                .get("vShieldedOutput")
+                                .and_then(|v| v.as_array())
+                                .map_or(false, |a| !a.is_empty())
+                    })
+                    .count() as u64
+            })
+            .unwrap_or(0);
+
+        Ok((sapling_root, sapling_tx))
     }
 }
 

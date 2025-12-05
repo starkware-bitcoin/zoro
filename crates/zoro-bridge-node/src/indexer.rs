@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use zoro_zcash_client::ZcashClient;
 
@@ -31,6 +31,8 @@ pub struct IndexerConfig {
     pub db_path: PathBuf,
     /// Indexing lag in blocks
     pub indexing_lag: u32,
+    /// Path to the FlyClient MMR database (optional)
+    pub flyclient_db_path: Option<PathBuf>,
 }
 
 impl Indexer {
@@ -62,6 +64,21 @@ impl Indexer {
             ChainStateManager::restore(store.clone(), next_block_height).await?;
         info!("Chain state manager initialized");
 
+        // Initialize FlyClient MMR store if configured
+        let mut flyclient_store = if let Some(ref path) = self.config.flyclient_db_path {
+            let fc_store = SqliteStore::open(path.to_str().unwrap())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open FlyClient store: {e}"))?;
+            info!(
+                "FlyClient MMR store opened at {:?} ({} nodes)",
+                path,
+                fc_store.len()
+            );
+            Some(fc_store)
+        } else {
+            None
+        };
+
         loop {
             tokio::select! {
                 res = zcash_client.wait_block_header(next_block_height, self.config.indexing_lag) => {
@@ -70,6 +87,32 @@ impl Indexer {
                             store.begin().await?;
                             chain_state_mgr.update(next_block_height, &block_header).await.map_err(|e| anyhow::anyhow!("Failed to update chain state: {e}"))?;
                             store.commit().await?;
+
+                            // Process FlyClient MMR for Heartwood+ blocks
+                            if let Some(ref mut fc_store) = flyclient_store {
+                                if next_block_height >= activation_height::HEARTWOOD {
+                                    let (sapling_root, sapling_tx) = bitcoin_client
+                                        .get_block_flyclient_data(next_block_height)
+                                        .await
+                                        .map_err(|e| anyhow::anyhow!("Failed to get FlyClient data: {e}"))?;
+
+                                    let bits = u32::from_be_bytes(
+                                        block_header.difficulty_threshold.bytes_in_display_order(),
+                                    );
+                                    let node = node_data_from_parts(
+                                        block_hash_to_bytes(&block_hash),
+                                        next_block_height,
+                                        block_header.time.timestamp() as u32,
+                                        bits,
+                                        sapling_root,
+                                        sapling_tx,
+                                    );
+
+                                    append_leaf(fc_store, node);
+                                    debug!("FlyClient MMR updated for block #{}", next_block_height);
+                                }
+                            }
+
                             info!("Block #{} {} processed", next_block_height, block_hash);
                             next_block_height += 1;
                         },

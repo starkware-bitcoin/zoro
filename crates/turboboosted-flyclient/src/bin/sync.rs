@@ -51,7 +51,7 @@ async fn generate_block_proof(db_path: &str, block_hash: &str) -> Result<()> {
     let start_height = activation_height::HEARTWOOD;
 
     // Load tree from SQLite
-    let store = SqliteStore::open(db_path)?;
+    let store = SqliteStore::open(db_path).await?;
     let tree = load_tree(&store).ok_or_else(|| anyhow::anyhow!("No tree data in database"))?;
     let leaves = leaf_count(tree.len());
 
@@ -140,7 +140,7 @@ async fn verify_proof(db_path: &str, proof_path: &str) -> Result<()> {
     );
 
     // Load tree from SQLite
-    let store = SqliteStore::open(db_path)?;
+    let store = SqliteStore::open(db_path).await?;
     let tree = load_tree(&store).ok_or_else(|| anyhow::anyhow!("No tree data in database"))?;
     let leaves = leaf_count(tree.len());
     let tree_height = mmr_start + leaves;
@@ -211,7 +211,7 @@ async fn run_sync(args: &[String], db_path: &str) -> Result<()> {
     println!("Requested range: {from_height} → {target}");
 
     // Load existing state from SQLite
-    let mut store = SqliteStore::open(db_path)?;
+    let mut store = SqliteStore::open(db_path).await?;
     let mut tree = load_tree(&store);
     let existing_leaves = tree.as_ref().map(|t| leaf_count(t.len())).unwrap_or(0);
     let existing_height = mmr_start + existing_leaves;
@@ -265,10 +265,12 @@ async fn run_sync(args: &[String], db_path: &str) -> Result<()> {
         // Append to tree and persist new nodes
         append_and_store(&mut tree, &mut store, node)?;
 
-        // Verify root periodically
+        // Verify root and flush periodically
         let leaf_num = leaf_idx + 1;
         if leaf_num.is_multiple_of(VERIFY_INTERVAL) {
             verify_and_print(&tree, &client, mmr_start + leaf_num).await?;
+            // Flush cache to DB to persist progress
+            store.flush().await.ok();
         }
 
         // Progress indicator
@@ -280,6 +282,9 @@ async fn run_sync(args: &[String], db_path: &str) -> Result<()> {
         }
     }
 
+    // Final flush
+    store.flush().await?;
+    
     println!("\n\n✓ Sync complete!");
     print_tree_status(&tree, &store, &client, mmr_start).await
 }

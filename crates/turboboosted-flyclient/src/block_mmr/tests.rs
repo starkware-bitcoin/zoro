@@ -339,10 +339,10 @@ mod mainnet {
     }
 }
 
-#[test]
-fn test_proof_for_height_and_hash() {
+#[tokio::test]
+async fn test_proof_for_height_and_hash() {
     // Build a store with test data
-    let mut store = SqliteStore::open_in_memory().unwrap();
+    let mut store = SqliteStore::open_in_memory().await.unwrap();
 
     // Add 10 blocks to store
     let block_count = 10u32;

@@ -1,10 +1,9 @@
 [workspace]
-resolver = "2"
 members = [
     "crates/zoro-spv-verify",
     "crates/zoro-bridge-node",
     "crates/zoro-zcash-client",
-]
+]resolver = "2"
 
 [patch."https://github.com/m-kus/cairo-vm"]
 cairo-vm = { git = "https://github.com/maciejka/cairo-vm", rev = "19d8a07ce9799a8af9db6f8a14a8accaad900214" }
@@ -16,7 +15,10 @@ reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "zstd"] }
 async-trait = "0.1"
 
 # zcash
-zebra-chain = {version = "3.1.0"}   
+zcash_primitives = { version = "0.26.1" }
+zcash_protocol = { version = "0.7.1" }
+zcash_history = { version = "0.4" }
+zebra-chain = { version = "3.1.0" }
 
 # RPC
 jsonrpsee = { version = "0.25.1", features = ["http-client", "async-client"] }
