@@ -131,15 +131,17 @@ pub async fn verify_block_header(
     block_header: &Header,
     block_header_proof: BlockInclusionProof,
 ) -> anyhow::Result<String> {
-    let BlockInclusionProof {
-        peaks_hashes,
-        siblings_hashes: _,
-        leaf_index: _,
-        leaf_count,
-    } = block_header_proof.clone();
-    let mmr = BlockMMR::from_peaks(peaks_hashes, leaf_count).await?;
-    mmr.verify_proof(block_header, block_header_proof).await?;
-    mmr.get_root_hash(None).await
+    unimplemented!();
+    // TODO: Add flyclient verification
+    // let BlockInclusionProof {
+    //     peaks_hashes,
+    //     siblings_hashes: _,
+    //     leaf_index: _,
+    //     leaf_count,
+    // } = block_header_proof.clone();
+    // let mmr = BlockMMR::from_peaks(peaks_hashes, leaf_count).await?;
+    // mmr.verify_proof(block_header, block_header_proof).await?;
+    // mmr.get_root_hash(None).await
 }
 
 /// Verify the Cairo recursive proof and consistency of the bootloader output with `chain_state`.
