@@ -12,7 +12,7 @@ anyhow = { workspace = true }
 
 raito-spv-verify = { path = "../raito-spv-verify" }
 zcash-client = { path = "../zcash-client" }
-
+zebra-chain.workspace = true
 num-bigint = "0.4.3"
 
 # CLI and env

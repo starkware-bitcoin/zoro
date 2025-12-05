@@ -309,7 +309,7 @@ pub async fn get_transaction_proof(
         block_height,
     };
 
-    return Ok(Json(obj));
+    Ok(Json(obj))
 }
 
 /// Get the chain state for a specific block height

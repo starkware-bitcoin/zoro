@@ -1,28 +1,35 @@
 //! Types representing the compressed SPV proof and helpers to decode Cairo outputs
 //! and compute chain state digests used during verification.
 
-
 use cairo_air::CairoProof;
-use stwo_prover::core::vcs::blake2_hash::Blake2sHasher;
-use zcash_client::serialize::{deserialize_header, deserialize_transaction, serialize_header, serialize_transaction};
 use serde::{Deserialize, Serialize};
 use starknet_ff::FieldElement;
+use stwo_prover::core::vcs::blake2_hash::Blake2sHasher;
 use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+use zcash_client::serialize::{
+    deserialize_header, deserialize_transaction, serialize_header, serialize_transaction,
+};
+use zcash_client::MerkleProof;
+use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
-use zebra_chain::block::Hash;
-// use zebra_chain::work::difficulty::Work;
 
 /// Zcash transaction inclusion data in a specific block
 #[derive(Serialize, Deserialize)]
 pub struct TransactionInclusionProof {
     /// The full Bitcoin transaction being proven
-    #[serde(serialize_with = "serialize_transaction", deserialize_with = "deserialize_transaction")]
+    #[serde(
+        serialize_with = "serialize_transaction",
+        deserialize_with = "deserialize_transaction"
+    )]
     pub transaction: Transaction,
     /// Encoded PartialMerkleTree containing the Merkle path for the transaction
-    pub transaction_proof: Vec<u8>,
+    pub transaction_proof: MerkleProof,
     /// Header of the block that includes the transaction
-    #[serde(serialize_with = "serialize_header", deserialize_with = "deserialize_header")]
+    #[serde(
+        serialize_with = "serialize_header",
+        deserialize_with = "deserialize_header"
+    )]
     pub block_header: Header,
     /// Height of the block that includes the transaction
     pub block_height: u32,
@@ -37,15 +44,21 @@ pub struct CompressedSpvProof {
     /// Recursive STARK proof of the chain state and block MMR root validity
     pub chain_state_proof: CairoProof<Blake2sMerkleHasher>,
     /// The header of the block containing the transaction
-    #[serde(serialize_with = "serialize_header", deserialize_with = "deserialize_header")]
+    #[serde(
+        serialize_with = "serialize_header",
+        deserialize_with = "deserialize_header"
+    )]
     pub block_header: Header,
     /// MMR inclusion proof for the block header
     pub block_header_proof: Vec<u8>, // ToDo: adapt for fly client
     /// The transaction to be proven
-    #[serde(serialize_with = "serialize_transaction", deserialize_with = "deserialize_transaction")]
+    #[serde(
+        serialize_with = "serialize_transaction",
+        deserialize_with = "deserialize_transaction"
+    )]
     pub transaction: Transaction,
-    /// Encoded [PartialMerkleTree] structure, contains Merkle branch for the transaction
-    pub transaction_proof: Vec<u8>,
+    /// Encoded [MerkleTree] structure, contains Merkle branch for the transaction
+    pub transaction_proof: MerkleProof,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,8 +269,7 @@ mod tests {
             ],
         };
         let res = chain_state.blake2s_digest().unwrap();
-        let expected =
-            "0x5f075316d513cf571854e8f4df77f22ce7bfae4c7a1b271d57d9dfb61a54e2ec";
+        let expected = "0x5f075316d513cf571854e8f4df77f22ce7bfae4c7a1b271d57d9dfb61a54e2ec";
         assert_eq!(res, expected);
     }
 

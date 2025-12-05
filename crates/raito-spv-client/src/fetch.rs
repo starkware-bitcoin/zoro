@@ -3,14 +3,13 @@
 
 use std::{io::Write, path::PathBuf};
 
-use bitcoin::{consensus, MerkleBlock, Txid};
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
 use bzip2::Compression;
-use zcash_client::ZcashClient;
-use raito_spv_mmr::block_mmr::BlockInclusionProof;
 use std::io::Read;
 use tracing::info;
+use zebra_chain::transaction::Hash;
+use zcash_client::ZcashClient;
 
 use raito_spv_verify::{
     verify::ChainStateProof, verify_proof, CompressedSpvProof, TransactionInclusionProof,
@@ -22,7 +21,7 @@ use raito_spv_verify::{
 pub struct FetchArgs {
     /// Transaction ID
     #[arg(long)]
-    txid: Txid,
+    txid: Hash,
     /// Path to save the proof
     #[arg(long)]
     proof_path: PathBuf,
@@ -151,45 +150,46 @@ pub fn load_compressed_proof_from_bzip2(
 /// - `bitcoin_rpc_userpwd`: Optional `user:password` for basic auth
 /// - `raito_rpc_url`: URL of the Raito bridge RPC
 pub async fn fetch_compressed_proof(
-    txid: Txid,
+    txid: Hash,
     bitcoin_rpc_url: String,
     bitcoin_rpc_userpwd: Option<String>,
     raito_rpc_url: String,
     dev: bool,
 ) -> Result<CompressedSpvProof, anyhow::Error> {
-    let ChainStateProof {
-        chain_state,
-        chain_state_proof,
-    } = fetch_chain_state_proof(&raito_rpc_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch chain state proof: {:?}", e))?;
+    unimplemented!();
+    // let ChainStateProof {
+    //     chain_state,
+    //     chain_state_proof,
+    // } = fetch_chain_state_proof(&raito_rpc_url)
+    //     .await
+    //     .map_err(|e| anyhow::anyhow!("Failed to fetch chain state proof: {:?}", e))?;
 
-    let TransactionInclusionProof {
-        transaction,
-        transaction_proof,
-        block_header,
-        block_height,
-    } = fetch_transaction_proof(txid, bitcoin_rpc_url, bitcoin_rpc_userpwd)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch transaction proof: {:?}", e))?;
+    // let TransactionInclusionProof {
+    //     transaction,
+    //     transaction_proof,
+    //     block_header,
+    //     block_height,
+    // } = fetch_transaction_proof(txid, bitcoin_rpc_url, bitcoin_rpc_userpwd)
+    //     .await
+    //     .map_err(|e| anyhow::anyhow!("Failed to fetch transaction proof: {:?}", e))?;
 
-    let block_header_proof = fetch_block_proof(
-        block_height,
-        chain_state.block_height as u32,
-        &raito_rpc_url,
-        dev,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to fetch block proof: {:?}", e))?;
+    // let block_header_proof = fetch_block_proof(
+    //     block_height,
+    //     chain_state.block_height as u32,
+    //     &raito_rpc_url,
+    //     dev,
+    // )
+    // .await
+    // .map_err(|e| anyhow::anyhow!("Failed to fetch block proof: {:?}", e))?;
 
-    Ok(CompressedSpvProof {
-        chain_state,
-        chain_state_proof,
-        block_header,
-        block_header_proof,
-        transaction,
-        transaction_proof,
-    })
+    // Ok(CompressedSpvProof {
+    //     chain_state,
+    //     chain_state_proof,
+    //     block_header,
+    //     block_header_proof,
+    //     transaction,
+    //     transaction_proof,
+    // })
 }
 
 /// Fetch the latest chain state proof from the Raito bridge RPC
@@ -218,9 +218,9 @@ pub async fn fetch_chain_state_proof(
 /// - `bitcoin_rpc_url`: URL of the Bitcoin node RPC
 /// - `bitcoin_rpc_userpwd`: Optional `user:password` for basic auth
 pub async fn fetch_transaction_proof(
-    txid: Txid,
-    bitcoin_rpc_url: String,
-    bitcoin_rpc_userpwd: Option<String>,
+    txid: Hash,
+    zcash_rpc_url: String,
+    zcash_rpc_userpwd: Option<String>,
 ) -> Result<TransactionInclusionProof, anyhow::Error> {
     info!("Fetching transaction proof for {} ...", txid);
     unimplemented!();
@@ -253,42 +253,43 @@ pub async fn fetch_block_proof(
     chain_height: u32,
     raito_rpc_url: &str,
     dev: bool,
-) -> Result<BlockInclusionProof, anyhow::Error> {
-    let url = if dev {
-        info!("DEV MODE: using local bridge node and default chain height");
-        format!(
-            "http://127.0.0.1:5000/block-inclusion-proof/{}",
-            block_height
-        )
-    } else {
-        let mmr_height = get_mmr_height(&raito_rpc_url).await?;
-        if mmr_height < chain_height {
-            return Err(anyhow::anyhow!(
-                "MMR height {} is less than chain height {}",
-                mmr_height,
-                chain_height
-            ));
-        }
-        format!(
-            "{}/block-inclusion-proof/{}?chain_height={}",
-            raito_rpc_url, block_height, chain_height
-        )
-    };
+) -> Result<(), anyhow::Error> {
+    unimplemented!()
+    // let url = if dev {
+    //     info!("DEV MODE: using local bridge node and default chain height");
+    //     format!(
+    //         "http://127.0.0.1:5000/block-inclusion-proof/{}",
+    //         block_height
+    //     )
+    // } else {
+    //     let mmr_height = get_mmr_height(&raito_rpc_url).await?;
+    //     if mmr_height < chain_height {
+    //         return Err(anyhow::anyhow!(
+    //             "MMR height {} is less than chain height {}",
+    //             mmr_height,
+    //             chain_height
+    //         ));
+    //     }
+    //     format!(
+    //         "{}/block-inclusion-proof/{}?chain_height={}",
+    //         raito_rpc_url, block_height, chain_height
+    //     )
+    // };
 
-    if block_height > chain_height {
-        return Err(anyhow::anyhow!(
-            "Block height {} cannot be greater than chain height {}",
-            block_height,
-            chain_height
-        ));
-    }
+    // if block_height > chain_height {
+    //     return Err(anyhow::anyhow!(
+    //         "Block height {} cannot be greater than chain height {}",
+    //         block_height,
+    //         chain_height
+    //     ));
+    // }
 
-    info!("Fetching block proof for block height {} ...", block_height);
-    let response = reqwest::get(url).await?;
-    match response.error_for_status() {
-        Ok(res) => Ok(res.json().await?),
-        Err(e) => Err(e.into()),
-    }
+    // info!("Fetching block proof for block height {} ...", block_height);
+    // let response = reqwest::get(url).await?;
+    // match response.error_for_status() {
+    //     Ok(res) => Ok(res.json().await?),
+    //     Err(e) => Err(e.into()),
+    // }
 }
 
 /// Get the current MMR height from the Raito bridge RPC

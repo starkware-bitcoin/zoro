@@ -6,6 +6,7 @@ use cairo_air::{CairoProof, PreProcessedTraceVariant};
 use serde::{Deserialize, Serialize};
 use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
+use zcash_client::MerkleProof;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
 
@@ -58,14 +59,14 @@ pub async fn verify_proof(
     config: &VerifierConfig,
     dev: bool,
 ) -> Result<(), anyhow::Error> {
-    let crate::proof::CompressedSpvProof {
-        chain_state,
-        chain_state_proof,
-        block_header,
-        block_header_proof,
-        transaction,
-        transaction_proof,
-    } = proof;
+    // let crate::proof::CompressedSpvProof {
+    //     chain_state,
+    //     chain_state_proof,
+    //     block_header,
+    //     block_header_proof,
+    //     transaction,
+    //     transaction_proof,
+    // } = proof;
 
     unimplemented!();
 
@@ -101,28 +102,18 @@ pub async fn verify_proof(
 pub fn verify_transaction(
     transaction: &Transaction,
     block_header: &Header,
-    transaction_proof: Vec<u8>,
+    transaction_proof: MerkleProof,
 ) -> anyhow::Result<()> {
-    unimplemented!();
-    // let merkle_block = MerkleBlock {
-    //     header: block_header.clone(),
-    //     txn: consensus::deserialize(&transaction_proof)?,
-    // };
+    let valid = transaction_proof.verify(transaction.hash().into());
+    if !valid {
+        anyhow::bail!("Transaction proof verification failed");
+    }
 
-    // let mut matches = Vec::new();
-    // let mut indexes = Vec::new();
-    // merkle_block.extract_matches(&mut matches, &mut indexes)?;
+    if transaction_proof.root != block_header.merkle_root {
+        anyhow::bail!("Merkle root mismatch");
+    }
 
-    // if matches.len() != 1 {
-    //     anyhow::bail!("Expected 1 transaction match");
-    // }
-
-    // let txid = transaction.compute_txid();
-    // if txid != matches[0] {
-    //     anyhow::bail!("Transaction ID mismatch");
-    // }
-
-    // Ok(())
+    Ok(())
 }
 
 /// Verify that `block_header` is included in the block MMR using the supplied inclusion proof.
