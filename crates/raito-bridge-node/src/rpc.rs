@@ -1,5 +1,6 @@
 //! HTTP RPC server providing REST endpoints for MMR proof generation and block count queries.
 
+use hex::FromHex;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info};
@@ -14,7 +15,7 @@ use axum::{
 use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
-use zebra_chain::block::Header;
+use zebra_chain::{block::Header, transaction::Hash};
 
 use raito_spv_verify::{ChainState, TransactionInclusionProof};
 
@@ -263,55 +264,52 @@ pub async fn get_block_headers(
 /// * `StatusCode::BAD_REQUEST` - If the transaction ID is invalid
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If proof generation fails
 pub async fn get_transaction_proof(
-    State(_state): State<AppState>,
-    Path(_tx_id): Path<String>,
+    State(state): State<AppState>,
+    Path(tx_id): Path<String>,
 ) -> Result<Json<TransactionInclusionProof>, StatusCode> {
-    unimplemented!();
-    // let txid = bitcoin::Txid::from_str(&tx_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    // let MerkleBlock {
-    //     header: block_header,
-    //     txn,
-    // } = state
-    //     .zcash_client
-    //     .get_transaction_inclusion_proof(&txid)
-    //     .await
-    //     .map_err(|e| {
-    //         error!(
-    //             "Failed to fetch transaction proof for txid {}: {}",
-    //             tx_id, e
-    //         );
-    //         StatusCode::INTERNAL_SERVER_ERROR
-    //     })?;
+    let txid = Hash::from_hex(&tx_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let block_height = state
+        .zcash_client
+        .get_transaction_block_height(&txid)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // let block_hash = block_header.block_hash();
-    // let block_height = state
-    //     .store
-    //     .get_block_height(&block_hash)
-    //     .await
-    //     .map_err(|e| {
-    //         error!(
-    //             "Failed to get block height for block hash {}: {}",
-    //             block_hash, e
-    //         );
-    //         StatusCode::INTERNAL_SERVER_ERROR
-    //     })?;
+    let block_header = state
+        .store
+        .get_block_headers(block_height, 1)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .pop()
+        .ok_or(StatusCode::NOT_FOUND)?;
 
-    // let transaction = state
-    //     .zcash_client
-    //     .get_transaction(&txid, &block_hash)
-    //     .await
-    //     .map_err(|e| {
-    //         error!("Failed to get transaction for txid {}: {}", tx_id, e);
-    //         StatusCode::INTERNAL_SERVER_ERROR
-    //     })?;
+    let block_merkle_tree = state
+        .zcash_client
+        .build_block_merkle_tree(block_height)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // let transaction_proof = TransactionInclusionProof {
-    //     transaction,
-    //     transaction_proof: consensus::encode::serialize(&txn),
-    //     block_header,
-    //     block_height,
-    // };
-    // Ok(Json(transaction_proof.into()))
+    let tx_index = block_merkle_tree
+        .get_transaction_index(txid)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let proof = block_merkle_tree
+        .generate_proof(tx_index)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let tx = state
+        .zcash_client
+        .get_transaction(&txid)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let obj = TransactionInclusionProof {
+        transaction: tx,
+        transaction_proof: proof,
+        block_header,
+        block_height,
+    };
+
+    return Ok(Json(obj));
 }
 
 /// Get the chain state for a specific block height
