@@ -8,9 +8,8 @@ anyhow = { workspace = true }
 
 # Zcash types
 zebra-chain.workspace = true
-
-# Zcash client
 zcash-client = { path = "../zcash-client" }
+
 # Logging
 tracing = "0.1"
 
