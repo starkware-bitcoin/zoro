@@ -54,7 +54,10 @@ impl Indexer {
             AppStore::single_atomic_writer(&self.config.mmr_db_path, mmr_id.clone()).await?,
         );
 
-        let mut next_block_height = store.get_latest_chain_state_height().await? + 1;
+        let mut next_block_height = match store.get_latest_chain_state_height().await {
+            Ok(height) => height + 1,
+            _ => 0,
+        };
 
         let mut chain_state_mgr =
             ChainStateManager::restore(store.clone(), next_block_height).await?;
