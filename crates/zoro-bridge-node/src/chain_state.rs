@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hex::{FromHex, ToHex};
-use zoro_spv_verify::{proof::Target, ChainState};
 use zebra_chain::{
     block::{Hash, Header},
     work::difficulty::{CompactDifficulty, ExpandedDifficulty, Work},
 };
+use zoro_spv_verify::{proof::Target, ChainState};
 
 const BLOCKS_PER_EPOCH: u32 = 2016;
 const POW_AVERAGING_WINDOW: usize = 17;

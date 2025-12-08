@@ -2,7 +2,6 @@ use std::ops::DerefMut;
 use std::path::Path;
 
 use async_trait::async_trait;
-use zoro_spv_verify::ChainState;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -15,6 +14,7 @@ use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
 use zebra_chain::serialization::ZcashDeserialize;
 use zebra_chain::serialization::ZcashSerialize;
+use zoro_spv_verify::ChainState;
 
 use crate::chain_state::ChainStateStore;
 

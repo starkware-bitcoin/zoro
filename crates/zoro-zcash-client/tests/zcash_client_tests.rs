@@ -1,6 +1,6 @@
+use hex::FromHex;
 use zcash_client::ZcashClient;
 use zebra_chain::transaction::Hash;
-use hex::FromHex;
 #[tokio::test]
 async fn zcash_client_main_flow_like_example() {
     // Same parameters as `crates/zoro-zcash-client/src/main.rs`
@@ -71,7 +71,7 @@ async fn zcash_client_get_transaction_test() {
         "84832e66f3261737b84da806f62bc07dce03e3002bef412766faa3d123f066e1",
         "ac694dd10970909bf1bfc6bd71f5e6c924b174a5ddf6529f5ba3b8e721724f9c",
         "381b65eb3fa04c1c78e73d4488b7e0b02f0469e5bd8e222f84c7896410e966dd",
-        "0a5803ee986c48fb9b8c8d949ee6b4e8f48c2d81a94fb36bbf168d66753a0d41"
+        "0a5803ee986c48fb9b8c8d949ee6b4e8f48c2d81a94fb36bbf168d66753a0d41",
     ];
 
     let client = ZcashClient::new(
@@ -88,6 +88,9 @@ async fn zcash_client_get_transaction_test() {
             .expect("get_transaction failed");
 
         let expected_txid = transaction.hash().0;
-        assert_eq!(expected_txid, Hash::from_hex(&txid_hex).expect("Invalid txid hex").0);
+        assert_eq!(
+            expected_txid,
+            Hash::from_hex(&txid_hex).expect("Invalid txid hex").0
+        );
     }
 }

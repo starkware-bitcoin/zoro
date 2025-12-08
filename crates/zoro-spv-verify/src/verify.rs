@@ -6,9 +6,9 @@ use cairo_air::{CairoProof, PreProcessedTraceVariant};
 use serde::{Deserialize, Serialize};
 use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
-use zoro_zcash_client::MerkleProof;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
+use zoro_zcash_client::MerkleProof;
 
 use crate::proof::{BootloaderOutput, ChainState, TaskResult};
 
@@ -163,9 +163,7 @@ pub fn verify_chain_state(
     } = BootloaderOutput::decode(output)?;
 
     if n_tasks != 1 {
-        anyhow::bail!(
-            "Bootloader output: number of tasks must be 1, got {n_tasks}"
-        );
+        anyhow::bail!("Bootloader output: number of tasks must be 1, got {n_tasks}");
     }
     if task_output_size != config.task_output_size {
         anyhow::bail!(
