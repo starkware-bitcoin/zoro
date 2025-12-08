@@ -2,16 +2,97 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use accumulators::{
+    hasher::flyclient::{encode_node_data, ZcashFlyclientHasher},
+    mmr::MMR,
+    store::{sqlite::SQLiteStore, SubKey},
+};
+use primitive_types::U256;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
-
+use zcash_history::NodeData;
+use zebra_chain::block::Hash as BlockHash;
 use zoro_zcash_client::ZcashClient;
 
 use crate::{
     chain_state::{ChainStateManager, ChainStateStore},
     store::AppStore,
 };
-/// Zcash block indexer that builds header state and generates sparse roots
+
+/// Heartwood activation height (mainnet)
+const HEARTWOOD_ACTIVATION: u32 = 903_000;
+
+/// Branch IDs for different network upgrades
+mod branch_id {
+    pub const HEARTWOOD: u32 = 0xf5b9230b;
+    pub const CANOPY: u32 = 0xe9ff75a6;
+    pub const NU5: u32 = 0xc2d6d0b4;
+}
+
+/// Convert zebra BlockHash to [u8; 32]
+fn block_hash_to_bytes(hash: &BlockHash) -> [u8; 32] {
+    hash.0
+}
+
+/// Get branch ID for a given block height
+fn branch_id_for_height(height: u32) -> u32 {
+    if height >= 1_687_104 {
+        branch_id::NU5
+    } else if height >= 1_046_400 {
+        branch_id::CANOPY
+    } else {
+        branch_id::HEARTWOOD
+    }
+}
+
+/// Compute work from compact bits (nBits)
+fn work_from_bits(bits: u32) -> U256 {
+    let exp = (bits >> 24) as usize;
+    let mantissa = bits & 0x007fffff;
+    if exp == 0 {
+        return U256::zero();
+    }
+    let target = if exp <= 3 {
+        U256::from(mantissa >> (8 * (3 - exp)))
+    } else {
+        U256::from(mantissa) << (8 * (exp - 3))
+    };
+    if target.is_zero() {
+        return U256::zero();
+    }
+    (U256::MAX - target) / (target + 1) + 1
+}
+
+/// Create NodeData from raw block data
+fn node_data_from_parts(
+    block_hash: [u8; 32],
+    height: u32,
+    timestamp: u32,
+    bits: u32,
+    sapling_root: [u8; 32],
+    sapling_tx: u64,
+) -> NodeData {
+    let branch_id = branch_id_for_height(height);
+    let work = work_from_bits(bits);
+    let mut wb = [0u8; 32];
+    work.to_little_endian(&mut wb);
+    NodeData {
+        consensus_branch_id: branch_id,
+        subtree_commitment: block_hash,
+        start_time: timestamp,
+        end_time: timestamp,
+        start_target: bits,
+        end_target: bits,
+        start_sapling_root: sapling_root,
+        end_sapling_root: sapling_root,
+        subtree_total_work: U256::from_little_endian(&wb),
+        start_height: height as u64,
+        end_height: height as u64,
+        sapling_tx,
+    }
+}
+
+/// Bitcoin block indexer that builds MMR accumulator and generates sparse roots
 pub struct Indexer {
     /// Indexer configuration
     config: IndexerConfig,
@@ -31,8 +112,6 @@ pub struct IndexerConfig {
     pub db_path: PathBuf,
     /// Indexing lag in blocks
     pub indexing_lag: u32,
-    /// Path to the FlyClient MMR database (optional)
-    pub flyclient_db_path: Option<PathBuf>,
 }
 
 impl Indexer {
@@ -64,20 +143,29 @@ impl Indexer {
             ChainStateManager::restore(store.clone(), next_block_height).await?;
         info!("Chain state manager initialized");
 
-        // Initialize FlyClient MMR store if configured
-        let mut flyclient_store = if let Some(ref path) = self.config.flyclient_db_path {
-            let fc_store = SqliteStore::open(path.to_str().unwrap())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to open FlyClient store: {e}"))?;
+        // Initialize FlyClient MMR if configured
+        let flyclient_mmr = {
+            let fc_store = SQLiteStore::new(
+                self.config.db_path.to_str().unwrap(),
+                Some(true),
+                Some("flyclient"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open FlyClient store: {e}"))?;
+
+            let hasher = Arc::new(ZcashFlyclientHasher);
+            let mmr = MMR::new(Arc::new(fc_store), hasher, Some("flyclient".to_string()));
+
+            let leaves = mmr.leaves_count.get().await.unwrap_or(0);
             info!(
-                "FlyClient MMR store opened at {:?} ({} nodes)",
-                path,
-                fc_store.len()
+                "FlyClient MMR initialized at {:?} ({} leaves)",
+                self.config.db_path, leaves
             );
-            Some(fc_store)
-        } else {
-            None
+            mmr
         };
+
+        // Wrap in Option<Arc<Mutex>> for mutable access
+        let flyclient_mmr = Arc::new(tokio::sync::Mutex::new(flyclient_mmr));
 
         loop {
             tokio::select! {
@@ -89,9 +177,9 @@ impl Indexer {
                             store.commit().await?;
 
                             // Process FlyClient MMR for Heartwood+ blocks
-                            if let Some(ref mut fc_store) = flyclient_store {
-                                if next_block_height >= activation_height::HEARTWOOD {
-                                    let (sapling_root, sapling_tx) = bitcoin_client
+
+                                if next_block_height >= HEARTWOOD_ACTIVATION {
+                                    let (sapling_root, sapling_tx) = zcash_client
                                         .get_block_flyclient_data(next_block_height)
                                         .await
                                         .map_err(|e| anyhow::anyhow!("Failed to get FlyClient data: {e}"))?;
@@ -108,10 +196,37 @@ impl Indexer {
                                         sapling_tx,
                                     );
 
-                                    append_leaf(fc_store, node);
+                                    // Append to FlyClient MMR
+                                    let mut mmr = flyclient_mmr.lock().await;
+                                    mmr.append(encode_node_data(&node)).await
+                                        .map_err(|e| anyhow::anyhow!("Failed to append to FlyClient MMR: {e}"))?;
+
+                                    // Verify root every 10 blocks
+                                    let leaves = mmr.leaves_count.get().await.unwrap_or(0);
+                                    if leaves % 10 == 0 || leaves <= 5 {
+                                        if let Some(our_root) = mmr.root_hash.get(SubKey::None).await.ok().flatten() {
+                                            // Get expected root from RPC (blockcommitments at next block)
+                                            let verify_height = HEARTWOOD_ACTIVATION + leaves as u32;
+                                            match zcash_client.get_block_commitment(verify_height).await {
+                                                Ok(expected) => {
+                                                    if our_root == expected {
+                                                        info!("FlyClient root ✓ at height {} ({} leaves)", verify_height, leaves);
+                                                    } else {
+                                                        error!("FlyClient root MISMATCH at height {}!", verify_height);
+                                                        error!("  Our root: {}", our_root);
+                                                        error!("  Expected: {}", expected);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    debug!("Could not verify FlyClient root: {e}");
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     debug!("FlyClient MMR updated for block #{}", next_block_height);
                                 }
-                            }
+
 
                             info!("Block #{} {} processed", next_block_height, block_hash);
                             next_block_height += 1;

@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::path::Path;
 
+use accumulators::store::{sqlite::SQLiteStore, Store as AccumulatorsStore, StoreError};
 use async_trait::async_trait;
-use sqlx::pool::PoolConnection;
+
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
     SqliteTransactionManager,
 };
-use sqlx::{Pool, Row, Sqlite, SqlitePool, TransactionManager};
-use thiserror::Error;
+use sqlx::{Row, TransactionManager};
+
 use tokio::fs;
 use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
@@ -17,76 +19,6 @@ use zebra_chain::serialization::ZcashSerialize;
 use zoro_spv_verify::ChainState;
 
 use crate::chain_state::ChainStateStore;
-
-/// An error that can occur when using the store.
-#[derive(Error, Debug)]
-pub enum StoreError {
-    #[error("Fail to get value from store")]
-    GetError,
-    #[error("SQLite error: {0}")]
-    SQLite(#[from] sqlx::Error),
-    #[error("Custom error: {0:?}")]
-    Custom(Box<dyn std::error::Error + Send + Sync + 'static>),
-}
-
-/// A key-value store backed by SQLite.
-#[derive(Debug)]
-pub struct SQLiteStore {
-    _id: Option<String>,
-    pool: Pool<Sqlite>,
-}
-
-impl SQLiteStore {
-    /// Create a new SQLite store with externally created pool.
-    pub fn with_pool(pool: Pool<Sqlite>, id: Option<String>) -> Self {
-        SQLiteStore { _id: id, pool }
-    }
-
-    /// Create a new SQLite store from a file path.
-    #[allow(unused)]
-    pub async fn new(
-        path: &str,
-        create_file_if_not_exists: Option<bool>,
-        id: Option<&str>,
-    ) -> Result<Self, sqlx::Error> {
-        let pool = if let Some(create_file_if_not_exists) = create_file_if_not_exists {
-            let options = SqliteConnectOptions::new()
-                .filename(path)
-                .create_if_missing(create_file_if_not_exists);
-            SqlitePool::connect_with(options).await?
-        } else {
-            SqlitePool::connect(path).await?
-        };
-
-        let store = SQLiteStore {
-            _id: id.map(|v| v.to_string()),
-            pool,
-        };
-        store.init().await?;
-        Ok(store)
-    }
-
-    /// Acquire a connection from the pool.
-    /// NOTE: if there's no available connection this function will fail after acquire timeout.
-    /// Configure it via sqlite options.
-    pub async fn acquire_connection(&self) -> Result<PoolConnection<Sqlite>, sqlx::Error> {
-        self.pool.acquire().await
-    }
-
-    /// Initialize the underlying key-value table.
-    pub async fn init(&self) -> Result<(), sqlx::Error> {
-        let mut conn = self.acquire_connection().await?;
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS store (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );"#,
-        )
-        .execute(conn.deref_mut())
-        .await?;
-        Ok(())
-    }
-}
 
 /// SQLite busy timeout in milliseconds
 const SQLITE_BUSY_TIMEOUT: &str = "5000";
@@ -277,5 +209,30 @@ impl ChainStateStore for AppStore {
             .execute(conn.deref_mut())
             .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AccumulatorsStore for AppStore {
+    fn id(&self) -> String {
+        self.0.id()
+    }
+    async fn get(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.0.get(key).await
+    }
+    async fn get_many(&self, keys: Vec<&str>) -> Result<HashMap<String, String>, StoreError> {
+        self.0.get_many(keys).await
+    }
+    async fn set(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.0.set(key, value).await
+    }
+    async fn set_many(&self, entries: HashMap<String, String>) -> Result<(), StoreError> {
+        self.0.set_many(entries).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StoreError> {
+        self.0.delete(key).await
+    }
+    async fn delete_many(&self, keys: Vec<&str>) -> Result<(), StoreError> {
+        self.0.delete_many(keys).await
     }
 }

@@ -151,7 +151,10 @@ impl ZcashClient {
         Ok((header, hash))
     }
 
-    pub async fn get_transaction_block_height(&self, txid: &TxHash) -> Result<u32, ZcashClientError> {
+    pub async fn get_transaction_block_height(
+        &self,
+        txid: &TxHash,
+    ) -> Result<u32, ZcashClientError> {
         let tx: Value = self
             .request("getrawtransaction", rpc_params![txid.to_string(), 1])
             .await?;
@@ -256,14 +259,12 @@ impl ZcashClient {
             .await?;
 
         // Extract finalsaplingroot (little-endian in RPC, we need to reverse)
-        let sapling_root_hex = blk["finalsaplingroot"]
-            .as_str()
-            .ok_or_else(|| {
-                ZcashClientError::ZcashBlockHeaderRead(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing finalsaplingroot in getblock response",
-                ))
-            })?;
+        let sapling_root_hex = blk["finalsaplingroot"].as_str().ok_or_else(|| {
+            ZcashClientError::ZcashBlockHeaderRead(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing finalsaplingroot in getblock response",
+            ))
+        })?;
         let mut sapling_root = [0u8; 32];
         let decoded = hex::decode(sapling_root_hex)?;
         sapling_root.copy_from_slice(&decoded);
@@ -288,6 +289,26 @@ impl ZcashClient {
             .unwrap_or(0);
 
         Ok((sapling_root, sapling_tx))
+    }
+
+    /// Get block commitment (FlyClient root) for a given height
+    pub async fn get_block_commitment(&self, height: u32) -> Result<String, ZcashClientError> {
+        let hash = self.get_block_hash(height).await?;
+        let blk: Value = self
+            .request("getblock", rpc_params![hash.to_string(), 1])
+            .await?;
+
+        let commitment = blk["blockcommitments"]
+            .as_str()
+            .ok_or_else(|| {
+                ZcashClientError::ZcashBlockHeaderRead(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing blockcommitments in getblock response",
+                ))
+            })?
+            .to_string();
+
+        Ok(commitment)
     }
 }
 

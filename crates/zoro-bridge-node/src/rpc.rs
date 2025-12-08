@@ -1,5 +1,12 @@
 //! HTTP RPC server providing REST endpoints for proof generation and block count queries.
 
+use accumulators::{
+    hasher::flyclient::ZcashFlyclientHasher,
+    mmr::{
+        elements_count_to_leaf_count, leaf_count_to_mmr_size, map_leaf_index_to_element_index,
+        ProofOptions, MMR,
+    },
+};
 use hex::FromHex;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -12,7 +19,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use zebra_chain::{block::Header, transaction::Hash};
@@ -25,6 +32,18 @@ use crate::{chain_state::ChainStateStore, store::AppStore};
 #[derive(Debug, Deserialize)]
 pub struct ChainHeightQuery {
     pub _chain_height: Option<u32>,
+}
+/// Proof data structure for demonstrating inclusion of a block in the MMR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInclusionProof {
+    /// MMR peak hashes at the time of proof generation
+    pub peaks_hashes: Vec<String>,
+    /// Sibling hashes needed to reconstruct the path to the root
+    pub siblings_hashes: Vec<String>,
+    /// Leaf index of the block in the MMR (same as block height)
+    pub leaf_index: usize,
+    /// Total number of leaves in the MMR
+    pub leaf_count: usize,
 }
 
 /// Query parameters for block headers retrieval
@@ -59,6 +78,7 @@ pub struct RpcServer {
 pub struct AppState {
     store: Arc<AppStore>,
     zcash_client: Arc<ZcashClient>,
+    flyclient_mmr: Arc<MMR>,
 }
 
 impl AppState {
@@ -68,11 +88,14 @@ impl AppState {
             &config.db_path,
             id.clone(),
         ));
+        let hasher = ZcashFlyclientHasher;
+        let mmr = MMR::new(store.clone(), Arc::new(hasher), mmr_id);
         let zcash_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {
             zcash_client: Arc::new(zcash_client),
             store: store.clone(),
+            flyclient_mmr: Arc::new(mmr),
         })
     }
 }
@@ -136,23 +159,44 @@ impl RpcServer {
 /// * `Json<InclusionProof>` - The inclusion proof in JSON format
 /// * `StatusCode::INTERNAL_SERVER_ERROR` - If proof generation fails
 pub async fn generate_proof(
-    State(_state): State<AppState>,
-    Path(_block_height): Path<u32>,
-    Query(_query): Query<ChainHeightQuery>,
-) -> Result<Json<()>, StatusCode> {
-    unimplemented!();
-    // let proof = state
-    //     .mmr
-    //     .generate_proof(block_height, query.chain_height)
-    //     .await
-    //     .map_err(|e| {
-    //         error!(
-    //             "Failed to generate block proof for height {}: {}",
-    //             block_height, e
-    //         );
-    //         StatusCode::INTERNAL_SERVER_ERROR
-    //     })?;
-    // Ok(Json(proof))
+    State(state): State<AppState>,
+    Path(block_height): Path<u32>,
+    Query(query): Query<ChainHeightQuery>,
+) -> Result<Json<BlockInclusionProof>, StatusCode> {
+    let element_index = map_leaf_index_to_element_index(block_height as usize);
+    let options = ProofOptions {
+        elements_count: query
+            .chain_height
+            .map(|c| leaf_count_to_mmr_size(c as usize + 1)),
+        ..Default::default()
+    };
+    let proof = {
+        let pr = state
+            .flyclient_mmr
+            .get_proof(element_index, Some(options))
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to generate block proof for height {}: {}",
+                    block_height, e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let leaf_count = elements_count_to_leaf_count(pr.elements_count).map_err(|e| {
+            error!(
+                "Failed to generate block proof for height {}: {}",
+                block_height, e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        BlockInclusionProof {
+            peaks_hashes: pr.peaks_hashes,
+            siblings_hashes: pr.siblings_hashes,
+            leaf_index: block_height as usize,
+            leaf_count,
+        }
+    };
+    Ok(Json(proof))
 }
 
 /// Get the current head (latest processed block height) from the DB

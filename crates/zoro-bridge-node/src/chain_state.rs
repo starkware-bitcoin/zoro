@@ -18,20 +18,26 @@ pub trait ChainStateStore: Send + Sync {
         &self,
         height: u32,
         block_header: &Header,
-    ) -> Result<(), crate::store::StoreError>;
+    ) -> Result<(), accumulators::store::StoreError>;
     async fn get_block_headers(
         &self,
         start_height: u32,
         num_blocks: u32,
-    ) -> Result<Vec<Header>, crate::store::StoreError>;
-    async fn _get_block_height(&self, block_hash: &Hash) -> Result<u32, crate::store::StoreError>;
+    ) -> Result<Vec<Header>, accumulators::store::StoreError>;
+    async fn _get_block_height(
+        &self,
+        block_hash: &Hash,
+    ) -> Result<u32, accumulators::store::StoreError>;
     async fn add_chain_state(
         &self,
         height: u32,
         chain_state: &ChainState,
-    ) -> Result<(), crate::store::StoreError>;
-    async fn get_chain_state(&self, height: u32) -> Result<ChainState, crate::store::StoreError>;
-    async fn get_latest_chain_state_height(&self) -> Result<u32, crate::store::StoreError>;
+    ) -> Result<(), accumulators::store::StoreError>;
+    async fn get_chain_state(
+        &self,
+        height: u32,
+    ) -> Result<ChainState, accumulators::store::StoreError>;
+    async fn get_latest_chain_state_height(&self) -> Result<u32, accumulators::store::StoreError>;
 }
 
 pub struct ChainStateManager {

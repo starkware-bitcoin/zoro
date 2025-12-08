@@ -3,7 +3,8 @@ members = [
     "crates/zoro-spv-verify",
     "crates/zoro-bridge-node",
     "crates/zoro-zcash-client",
-]resolver = "2"
+]
+resolver = "2"
 
 [patch."https://github.com/m-kus/cairo-vm"]
 cairo-vm = { git = "https://github.com/maciejka/cairo-vm", rev = "19d8a07ce9799a8af9db6f8a14a8accaad900214" }
