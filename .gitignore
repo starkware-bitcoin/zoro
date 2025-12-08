@@ -33,6 +33,7 @@ __pycache__
 .utxo_data/
 .utreexo_data
 .mmr_data/
+.data/
 .timestamps_data/
 .arguments*.json
 .proofs*
