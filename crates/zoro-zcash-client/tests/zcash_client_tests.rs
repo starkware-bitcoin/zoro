@@ -3,7 +3,7 @@ use zebra_chain::transaction::Hash;
 use hex::FromHex;
 #[tokio::test]
 async fn zcash_client_main_flow_like_example() {
-    // Same parameters as `crates/raito-bitcoin-client/src/main.rs`
+    // Same parameters as `crates/zoro-zcash-client/src/main.rs`
     let client = ZcashClient::new(
         "https://go.getblock.io/5c5842f906c341c5a50cf95b602d0a09".to_string(),
         None,

@@ -1,20 +1,21 @@
 [package]
-name = "raito-bridge-node"
+name = "zoro-bridge-node"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zcash-client = { path = "../zcash-client" }
+zoro-zcash-client = { path = "../zoro-zcash-client" }
+zoro-spv-verify = { path = "../zoro-spv-verify" }
+
+# Zcash types
 zebra-chain.workspace = true
-raito-spv-verify = { path = "../raito-spv-verify" }
+
 # Async runtime
 tokio.workspace = true
 async-trait.workspace = true
 # Web framework
 axum = "0.7"
 tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
-
-# Bitcoin RPC and types (re-exported from raito-spv-mmr but needed for specific features)
 
 # Storage
 sqlx.workspace = true

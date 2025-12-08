@@ -33,14 +33,14 @@ struct Cli {
     #[arg(long, env = "USERPWD")]
     zcash_rpc_userpwd: Option<String>,
     /// Path to the database storing the app state
-    #[arg(long, default_value = "./.mmr_data/mmr.db")]
+    #[arg(long, default_value = "./.data/app.db")]
     db_path: PathBuf,
-    /// MMR ID
+    /// ID
     #[arg(long, default_value = "blocks")]
-    mmr_id: String,
+    id: String,
     /// Indexing lag in blocks, to address potential reorgs
     #[arg(long, default_value = "1")]
-    mmr_block_lag: u32,
+    block_lag: u32,
     /// Logging level (off, error, warn, info, debug, trace)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -73,16 +73,16 @@ async fn main() {
     let indexer_config = IndexerConfig {
         rpc_url: cli.zcash_rpc_url.clone(),
         rpc_userpwd: cli.zcash_rpc_userpwd.clone(),
-        mmr_id: cli.mmr_id.clone(),
-        mmr_db_path: cli.db_path.clone(),
-        indexing_lag: cli.mmr_block_lag,
+        id: cli.id.clone(),
+        db_path: cli.db_path.clone(),
+        indexing_lag: cli.block_lag,
     };
     let mut indexer = Indexer::new(indexer_config, shutdown.subscribe());
 
     let rpc_config = RpcConfig {
         rpc_host: cli.rpc_host,
-        mmr_id: cli.mmr_id,
-        mmr_db_path: cli.db_path.clone(),
+        id: cli.id,
+        db_path: cli.db_path.clone(),
         rpc_url: cli.zcash_rpc_url.clone(),
         rpc_userpwd: cli.zcash_rpc_userpwd.clone(),
     };

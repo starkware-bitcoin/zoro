@@ -18,7 +18,7 @@ pub mod serialize;
 
 pub use merkle::{MerkleProof, MerkleTree};
 
-/// Error types for Bitcoin RPC client operations
+/// Error types for Zcash RPC client operations
 #[derive(Error, Debug)]
 pub enum ZcashClientError {
     /// RPC client errors
@@ -309,7 +309,6 @@ fn is_retryable_error(err: &ZcashClientError) -> bool {
                 _ => false,
             }
         }
-        // Don't retry any other error types (hex decode, bitcoin deserialization, header issues)
         _ => false,
     }
 }

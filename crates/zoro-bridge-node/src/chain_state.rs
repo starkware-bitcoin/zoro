@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use hex::{FromHex, ToHex};
-use raito_spv_verify::{proof::Target, ChainState};
+use zoro_spv_verify::{proof::Target, ChainState};
 use zebra_chain::{
     block::{Hash, Header},
     work::difficulty::{CompactDifficulty, ExpandedDifficulty, Work},
@@ -24,7 +24,7 @@ pub trait ChainStateStore: Send + Sync {
         start_height: u32,
         num_blocks: u32,
     ) -> Result<Vec<Header>, crate::store::StoreError>;
-    async fn get_block_height(&self, block_hash: &Hash) -> Result<u32, crate::store::StoreError>;
+    async fn _get_block_height(&self, block_hash: &Hash) -> Result<u32, crate::store::StoreError>;
     async fn add_chain_state(
         &self,
         height: u32,

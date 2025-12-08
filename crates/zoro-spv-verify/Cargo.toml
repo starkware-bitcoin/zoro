@@ -1,5 +1,5 @@
 [package]
-name = "raito-spv-verify"
+name = "zoro-spv-verify"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ anyhow = { workspace = true }
 
 # Zcash types
 zebra-chain.workspace = true
-zcash-client = { path = "../zcash-client" }
+zoro-zcash-client = { path = "../zoro-zcash-client" }
 
 # Logging
 tracing = "0.1"

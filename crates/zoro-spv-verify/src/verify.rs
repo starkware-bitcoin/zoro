@@ -6,7 +6,7 @@ use cairo_air::{CairoProof, PreProcessedTraceVariant};
 use serde::{Deserialize, Serialize};
 use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
-use zcash_client::MerkleProof;
+use zoro_zcash_client::MerkleProof;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
 
@@ -54,9 +54,9 @@ pub struct ChainStateProof {
 /// This checks transaction inclusion, block header inclusion in the block MMR,
 /// Cairo recursive proof validity, and sufficient subchain work.
 pub async fn verify_proof(
-    proof: crate::proof::CompressedSpvProof,
-    config: &VerifierConfig,
-    dev: bool,
+    _proof: crate::proof::CompressedSpvProof,
+    _config: &VerifierConfig,
+    _dev: bool,
 ) -> Result<(), anyhow::Error> {
     // let crate::proof::CompressedSpvProof {
     //     chain_state,
@@ -119,8 +119,8 @@ pub fn verify_transaction(
 ///
 /// Returns the computed block MMR root on success.
 pub async fn verify_block_header(
-    block_header: &Header,
-    block_header_proof: Vec<u8>, // ToDo: adapt for fly client
+    _block_header: &Header,
+    _block_header_proof: Vec<u8>, // ToDo: adapt for fly client
 ) -> anyhow::Result<String> {
     unimplemented!();
     // TODO: Add flyclient verification

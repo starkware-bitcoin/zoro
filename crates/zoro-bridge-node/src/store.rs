@@ -2,7 +2,7 @@ use std::ops::DerefMut;
 use std::path::Path;
 
 use async_trait::async_trait;
-use raito_spv_verify::ChainState;
+use zoro_spv_verify::ChainState;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -32,17 +32,18 @@ pub enum StoreError {
 /// A key-value store backed by SQLite.
 #[derive(Debug)]
 pub struct SQLiteStore {
-    id: Option<String>,
+    _id: Option<String>,
     pool: Pool<Sqlite>,
 }
 
 impl SQLiteStore {
     /// Create a new SQLite store with externally created pool.
     pub fn with_pool(pool: Pool<Sqlite>, id: Option<String>) -> Self {
-        SQLiteStore { id, pool }
+        SQLiteStore { _id: id, pool }
     }
 
     /// Create a new SQLite store from a file path.
+    #[allow(unused)]
     pub async fn new(
         path: &str,
         create_file_if_not_exists: Option<bool>,
@@ -58,7 +59,7 @@ impl SQLiteStore {
         };
 
         let store = SQLiteStore {
-            id: id.map(|v| v.to_string()),
+            _id: id.map(|v| v.to_string()),
             pool,
         };
         store.init().await?;
@@ -144,7 +145,7 @@ impl AppStore {
 
     /// Initialize the store by creating the tables if missing
     async fn init(&self) -> Result<(), sqlx::Error> {
-        // Create a key-value store table for MMR accumulator state
+        // Create a key-value store table for header state
         self.0.init().await?;
         // Create a table for encoded block headers
         let mut conn = self.0.acquire_connection().await?;
@@ -236,7 +237,7 @@ impl ChainStateStore for AppStore {
     }
 
     /// Get the height of a block by its hash
-    async fn get_block_height(&self, block_hash: &Hash) -> Result<u32, StoreError> {
+    async fn _get_block_height(&self, block_hash: &Hash) -> Result<u32, StoreError> {
         let mut conn = self.0.acquire_connection().await?;
         let row = sqlx::query("SELECT height FROM block_headers WHERE hash = ?")
             .bind(block_hash.to_string())

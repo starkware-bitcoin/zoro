@@ -1,10 +1,10 @@
-//! HTTP RPC server providing REST endpoints for MMR proof generation and block count queries.
+//! HTTP RPC server providing REST endpoints for proof generation and block count queries.
 
 use hex::FromHex;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info};
-use zcash_client::ZcashClient;
+use zoro_zcash_client::ZcashClient;
 
 use axum::{
     extract::{Path, Query, State},
@@ -17,14 +17,14 @@ use std::{path::PathBuf, sync::Arc};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use zebra_chain::{block::Header, transaction::Hash};
 
-use raito_spv_verify::{ChainState, TransactionInclusionProof};
+use zoro_spv_verify::{ChainState, TransactionInclusionProof};
 
 use crate::{chain_state::ChainStateStore, store::AppStore};
 
 /// Query parameters for block inclusion proof generation and roots retrieval
 #[derive(Debug, Deserialize)]
 pub struct ChainHeightQuery {
-    pub chain_height: Option<u32>,
+    pub _chain_height: Option<u32>,
 }
 
 /// Query parameters for block headers retrieval
@@ -39,17 +39,17 @@ pub struct BlockHeadersQuery {
 pub struct RpcConfig {
     /// Host and port binding for the RPC server (e.g., "127.0.0.1:5000")
     pub rpc_host: String,
-    /// MMR ID
-    pub mmr_id: String,
-    /// Path to the database storing the MMR accumulator
-    pub mmr_db_path: PathBuf,
-    /// Bitcoin RPC URL
+    /// ID
+    pub id: String,
+    /// Path to the database storing the header state
+    pub db_path: PathBuf,
+    /// Zcash RPC URL
     pub rpc_url: String,
-    /// Bitcoin RPC user:password (optional)
+    /// Zcash RPC user:password (optional)
     pub rpc_userpwd: Option<String>,
 }
 
-/// HTTP RPC server that provides endpoints for MMR operations
+/// HTTP RPC server that provides endpoints for header state operations
 pub struct RpcServer {
     config: RpcConfig,
     rx_shutdown: broadcast::Receiver<()>,
@@ -63,10 +63,10 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: RpcConfig) -> Result<Self, anyhow::Error> {
-        let mmr_id = Some(config.mmr_id.clone());
+        let id = Some(config.id.clone());
         let store = Arc::new(AppStore::multiple_concurrent_readers(
-            &config.mmr_db_path,
-            mmr_id.clone(),
+            &config.db_path,
+            id.clone(),
         ));
         let zcash_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
@@ -95,7 +95,6 @@ impl RpcServer {
         let app = Router::new()
             .route("/block-inclusion-proof/:block_height", get(generate_proof))
             .route("/head", get(get_head))
-            .route("/roots", get(get_roots))
             .route("/headers", get(get_block_headers))
             .route("/transaction-proof/:tx_id", get(get_transaction_proof))
             .route("/block-header/:block_height", get(get_block_header))
@@ -154,33 +153,6 @@ pub async fn generate_proof(
     //         StatusCode::INTERNAL_SERVER_ERROR
     //     })?;
     // Ok(Json(proof))
-}
-
-/// Get the roots of the MMR: latest or for a given block count (optional)
-///
-/// # Arguments
-/// * `chain_height` - The chain (MMR) height to get the roots for (optional)
-///
-/// # Returns
-/// * `Json<SparseRoots>` - The sparse roots in JSON format
-/// * `StatusCode::INTERNAL_SERVER_ERROR` - If getting roots fails
-pub async fn get_roots(
-    State(_state): State<AppState>,
-    Query(_query): Query<ChainHeightQuery>,
-) -> Result<Json<()>, StatusCode> {
-    unimplemented!();
-    // let sparse_roots = state
-    //     .mmr
-    //     .get_sparse_roots(query.chain_height)
-    //     .await
-    //     .map_err(|e| {
-    //         error!(
-    //             "Failed to get sparse roots for chain height {:?}: {}",
-    //             query.chain_height, e
-    //         );
-    //         StatusCode::INTERNAL_SERVER_ERROR
-    //     })?;
-    // Ok(Json(sparse_roots))
 }
 
 /// Get the current head (latest processed block height) from the DB

@@ -1,17 +1,17 @@
-//! Bitcoin blockchain indexer that builds MMR accumulator and generates sparse roots for new blocks.
+//! Zcash blockchain indexer that builds header state
 
 use std::{path::PathBuf, sync::Arc};
 
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
-use zcash_client::ZcashClient;
+use zoro_zcash_client::ZcashClient;
 
 use crate::{
     chain_state::{ChainStateManager, ChainStateStore},
     store::AppStore,
 };
-/// Bitcoin block indexer that builds MMR accumulator and generates sparse roots
+/// Zcash block indexer that builds header state and generates sparse roots
 pub struct Indexer {
     /// Indexer configuration
     config: IndexerConfig,
@@ -21,14 +21,14 @@ pub struct Indexer {
 
 #[derive(Debug, Clone)]
 pub struct IndexerConfig {
-    /// Bitcoin RPC URL
+    /// Zcash RPC URL
     pub rpc_url: String,
-    /// Bitcoin RPC user:password (optional)
+    /// Zcash RPC user:password (optional)
     pub rpc_userpwd: Option<String>,
-    /// MMR ID
-    pub mmr_id: String,
-    /// Path to the database storing the MMR accumulator
-    pub mmr_db_path: PathBuf,
+    /// ID
+    pub id: String,
+    /// Path to the database storing the header state
+    pub db_path: PathBuf,
     /// Indexing lag in blocks
     pub indexing_lag: u32,
 }
@@ -44,15 +44,14 @@ impl Indexer {
     async fn run_inner(&mut self) -> Result<(), anyhow::Error> {
         info!("Block indexer started");
 
-        let mut bitcoin_client =
+        let mut zcash_client =
             ZcashClient::new(self.config.rpc_url.clone(), self.config.rpc_userpwd.clone()).await?;
-        info!("Bitcoin RPC client initialized");
+        info!("Zcash RPC client initialized");
 
-        // We need to specify mmr_id to have deterministic keys in the database
-        let mmr_id = Some(self.config.mmr_id.clone());
-        let store = Arc::new(
-            AppStore::single_atomic_writer(&self.config.mmr_db_path, mmr_id.clone()).await?,
-        );
+        // We need to specify id to have deterministic keys in the database
+        let id = Some(self.config.id.clone());
+        let store =
+            Arc::new(AppStore::single_atomic_writer(&self.config.db_path, id.clone()).await?);
 
         let mut next_block_height = match store.get_latest_chain_state_height().await {
             Ok(height) => height + 1,
@@ -65,7 +64,7 @@ impl Indexer {
 
         loop {
             tokio::select! {
-                res = bitcoin_client.wait_block_header(next_block_height, self.config.indexing_lag) => {
+                res = zcash_client.wait_block_header(next_block_height, self.config.indexing_lag) => {
                     match res {
                         Ok((block_header, block_hash)) => {
                             store.begin().await?;
