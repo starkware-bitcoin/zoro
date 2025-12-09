@@ -289,6 +289,7 @@ pub async fn prove(params: ProveParams) -> Result<()> {
         };
 
         let args_file = batch_dir.join("arguments.json");
+        println!("args_file: {}", args_file.to_string_lossy());
         generate_and_save_args(&client, assumevalid_params, &args_file.to_string_lossy()).await?;
         let args_elapsed = args_start_time.elapsed();
         debug!(

@@ -145,9 +145,12 @@ impl ChainStateManager {
         let current_target =
             Target::from_hex("0007ffff00000000000000000000000000000000000000000000000000000000")
                 .unwrap();
-        // Genesis pow_target_history starts with 1 entry, will grow as blocks are added
-        // Cairo's ensure_pow_history will expand short histories to full window length
-        let pow_target_history = vec![current_target.clone()];
+
+        // Genesis pow_target_history must have POW_AVERAGING_WINDOW (17) entries
+        // to match Cairo's Default::default() for ChainState
+        let pow_target_history = (0..POW_AVERAGING_WINDOW)
+            .map(|_| current_target.clone())
+            .collect();
 
         // Genesis block hash in display order
         ChainState {
