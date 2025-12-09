@@ -393,55 +393,45 @@ pub fn is_valid_solution_format(indices: Span<u32>) -> bool {
 const PERMUTATION_PRIME: u128 = 18446744073709551557_u128;
 // Base for polynomial hash: prime > 2^21 (max index value)
 const PERMUTATION_BASE: u128 = 2097169_u128;
+// Offset added to challenge to ensure r > max index value (2^21)
+// This guarantees r - idx_val never underflows
+const CHALLENGE_OFFSET: u128 = 10000000000_u128;
 
 /// Computes a deterministic Fiat-Shamir challenge from the indices.
 /// This derives a "random" value r from the input data itself.
-fn compute_permutation_challenge(indices: Span<u32>) -> u128 {
+fn compute_permutation_challenge(mut indices: Span<u32>) -> u128 {
     let mut hash: u128 = 0;
     let mut power: u128 = 1;
 
     for idx in indices {
         let idx_val: u128 = (*idx).into();
-        hash = (hash + (idx_val * power) % PERMUTATION_PRIME) % PERMUTATION_PRIME;
+        // idx_val < 2^21, power < 2^64, so product < 2^85 fits in u128
+        // hash < 2^64, adding < 2^85 still fits in u128
+        hash = (hash + idx_val * power) % PERMUTATION_PRIME;
         power = (power * PERMUTATION_BASE) % PERMUTATION_PRIME;
-    };
+    }
 
-    // Add offset to ensure r > max possible index value
-    (hash + 10000000000_u128) % PERMUTATION_PRIME
+    (hash + CHALLENGE_OFFSET) % PERMUTATION_PRIME
 }
 
 /// Verifies that sorted_hint is a permutation of indices using the product check.
 /// Based on Schwartz-Zippel lemma: if ∏(r - indices[i]) == ∏(r - sorted_hint[i])
 /// for a random r, then the multisets are equal with overwhelming probability.
 fn verify_permutation(mut indices: Span<u32>, mut sorted_hint: Span<u32>, r: u128) -> bool {
-    let len = indices.len();
-
     let mut prod_indices: u128 = 1;
     let mut prod_sorted: u128 = 1;
 
-    let mut j: usize = 0;
-    while j < len {
-        let idx_val: u128 = (*indices.pop_front().unwrap()).into();
+    for idx in indices {
+        let idx_val: u128 = (*idx).into();
         let sorted_val: u128 = (*sorted_hint.pop_front().unwrap()).into();
 
-        // Compute (r - idx_val) mod prime, handling potential underflow
-        let diff_idx = if r >= idx_val {
-            r - idx_val
-        } else {
-            PERMUTATION_PRIME - ((idx_val - r) % PERMUTATION_PRIME)
-        };
-
-        let diff_sorted = if r >= sorted_val {
-            r - sorted_val
-        } else {
-            PERMUTATION_PRIME - ((sorted_val - r) % PERMUTATION_PRIME)
-        };
+        // r >= CHALLENGE_OFFSET > 2^21 > max_index, so r > idx_val always
+        let diff_idx = r - idx_val;
+        let diff_sorted = r - sorted_val;
 
         prod_indices = (prod_indices * diff_idx) % PERMUTATION_PRIME;
         prod_sorted = (prod_sorted * diff_sorted) % PERMUTATION_PRIME;
-
-        j += 1;
-    };
+    }
 
     prod_indices == prod_sorted
 }
@@ -456,17 +446,13 @@ fn is_strictly_increasing(mut span: Span<u32>) -> bool {
     }
     let mut prev = *first.unwrap();
 
-    loop {
-        match span.pop_front() {
-            Option::Some(curr) => {
-                if prev >= *curr {
-                    break false;
-                }
-                prev = *curr;
-            },
-            Option::None => { break true; },
+    for idx in span {
+        if prev >= *idx {
+            return false;
         }
+        prev = *idx;
     }
+    true
 }
 
 /// Verifies that all indices are unique using a sorted hint.
