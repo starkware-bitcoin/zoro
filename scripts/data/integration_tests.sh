@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCARB="$SCRIPT_DIR/../../../scarb/target/debug/scarb"
+SCARB="${SCARB:-scarb}"
 
 GREEN='\033[0;32m'
 RED='\033[1;31m'
@@ -73,13 +72,11 @@ for test_file in "${test_files[@]}"; do
             steps=$(echo $output | grep -o 'steps: [0-9,]*' | sed 's/steps: //')
 
             if [[ "$nocapture" -eq 1 ]]; then
-                mkdir -p ../../tests/data/outputs
-                echo -e "\n$output" > ../../tests/data/outputs/$(Date +%s)-$(basename "$test_file").out
+                echo -e "\n$output"
             fi
 
             if [[ "$output" == *"FAIL"* ]]; then
                 echo -e "${RED} fail ${RESET}(steps: $steps)"
-                echo -e "\n$output\n"
                 num_fail=$((num_fail + 1))
                 error=$(echo $output | grep -o "error='[^']*'" | sed "s/error=//")
                 failures+="\t$test_file — Panicked with $error\n"
@@ -89,7 +86,6 @@ for test_file in "${test_files[@]}"; do
                 rm $arguments_file
             else
                 echo -e "${RED} fail ${RESET}"
-                echo -e "\n$output\n"
                 num_fail=$((num_fail + 1))
                 error=$(echo "$output" | sed '1d' | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g') #spellchecker:disable-line
                 failures+="\t$test_file — $error\n"
