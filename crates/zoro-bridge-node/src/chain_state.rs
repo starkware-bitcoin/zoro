@@ -95,12 +95,9 @@ impl ChainStateManager {
             let best_block_hash = block_header.hash();
 
             // Update PoW target history as a sliding window over recent targets.
+            // History grows from 1 to POW_AVERAGING_WINDOW, then slides.
             let mut pow_target_history = self.current_state.pow_target_history.clone();
-            if pow_target_history.is_empty() {
-                pow_target_history = (0..POW_AVERAGING_WINDOW)
-                    .map(|_| current_target.clone())
-                    .collect();
-            } else if pow_target_history.len() == POW_AVERAGING_WINDOW {
+            if pow_target_history.len() >= POW_AVERAGING_WINDOW {
                 pow_target_history.remove(0);
             }
             pow_target_history.push(current_target.clone());
@@ -143,15 +140,19 @@ impl ChainStateManager {
     }
 
     pub fn genesis_state() -> ChainState {
+        // Genesis block bits = 0x1f07ffff -> target = 0x07ffff << (8 * (0x1f - 3))
+        // = 0x7ffff00000000000000000000000000000000000000000000000000000000
         let current_target =
-            Target::from_hex("0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+            Target::from_hex("0007ffff00000000000000000000000000000000000000000000000000000000")
                 .unwrap();
-        let pow_target_history = (0..POW_AVERAGING_WINDOW)
-            .map(|_| current_target.clone())
-            .collect();
+        // Genesis pow_target_history starts with 1 entry, will grow as blocks are added
+        // Cairo's ensure_pow_history will expand short histories to full window length
+        let pow_target_history = vec![current_target.clone()];
 
+        // Genesis block hash in display order
         ChainState {
             block_height: 0,
+            // Work = 2^256 / (target + 1) ≈ 0x2000 for genesis target
             total_work: 0x2000,
             best_block_hash: Hash::from_hex(
                 "00040fe8ec8471911baa1db1266ea15dd06b4a8a5c453883c000b031973dce08",
@@ -159,6 +160,7 @@ impl ChainStateManager {
             .unwrap(),
             current_target,
             prev_timestamps: vec![1477641360],
+            // Use actual genesis block time as epoch start
             epoch_start_time: 1477641360,
             pow_target_history,
         }

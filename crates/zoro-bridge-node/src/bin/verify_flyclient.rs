@@ -7,12 +7,12 @@ use std::sync::Arc;
 use accumulators::{
     hasher::flyclient::{decode_node_data, encode_node_data, ZcashFlyclientHasher},
     mmr::{helpers::find_peaks, MMR},
-    store::{memory::InMemoryStore, Store, SubKey},
+    store::{memory::InMemoryStore, SubKey},
 };
 use clap::{command, Parser};
 use primitive_types::U256;
-use zcash_client::ZcashClient;
 use zcash_history::{NodeData, Version, V1};
+use zoro_zcash_client::ZcashClient;
 
 const HEARTWOOD_ACTIVATION: u32 = 903_000;
 

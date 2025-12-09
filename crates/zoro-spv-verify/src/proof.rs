@@ -4,8 +4,8 @@
 use cairo_air::CairoProof;
 use serde::{Deserialize, Serialize};
 use starknet_ff::FieldElement;
-use stwo_prover::core::vcs::blake2_hash::Blake2sHasher;
-use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+use stwo::core::vcs::blake2_hash::Blake2sHasher;
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
@@ -75,6 +75,10 @@ impl Target {
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 

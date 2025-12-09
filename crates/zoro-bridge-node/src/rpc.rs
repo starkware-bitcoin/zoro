@@ -31,7 +31,7 @@ use crate::{chain_state::ChainStateStore, store::AppStore};
 /// Query parameters for block inclusion proof generation and roots retrieval
 #[derive(Debug, Deserialize)]
 pub struct ChainHeightQuery {
-    pub _chain_height: Option<u32>,
+    pub chain_height: Option<u32>,
 }
 /// Proof data structure for demonstrating inclusion of a block in the MMR
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +89,11 @@ impl AppState {
             id.clone(),
         ));
         let hasher = ZcashFlyclientHasher;
-        let mmr = MMR::new(store.clone(), Arc::new(hasher), mmr_id);
+        let mmr = MMR::new(
+            store.clone(),
+            Arc::new(hasher),
+            Some(format!("flyclient_{}", config.id)),
+        );
         let zcash_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {

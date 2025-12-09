@@ -92,7 +92,7 @@ fn node_data_from_parts(
     }
 }
 
-/// Bitcoin block indexer that builds MMR accumulator and generates sparse roots
+/// Zcash block indexer that builds FlyClient MMR accumulator
 pub struct Indexer {
     /// Indexer configuration
     config: IndexerConfig,

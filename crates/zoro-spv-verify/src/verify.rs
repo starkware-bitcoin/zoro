@@ -4,7 +4,7 @@
 use cairo_air::utils::{get_verification_output, VerificationOutput};
 use cairo_air::{CairoProof, PreProcessedTraceVariant};
 use serde::{Deserialize, Serialize};
-use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::info;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
@@ -140,7 +140,7 @@ pub async fn verify_block_header(
 /// Returns the block MMR root extracted from the proof on success.
 pub fn verify_chain_state(
     chain_state: &ChainState,
-    chain_state_proof: CairoProof<stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher>,
+    chain_state_proof: CairoProof<stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher>,
     config: &VerifierConfig,
 ) -> anyhow::Result<String> {
     info!("Extracting verification output...");
@@ -217,9 +217,9 @@ pub fn verify_chain_state(
     }
 
     info!("Verifying Cairo proof...");
-    cairo_air::verifier::verify_cairo::<stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleChannel>(
+    cairo_air::verifier::verify_cairo::<stwo::core::vcs::blake2_merkle::Blake2sMerkleChannel>(
         chain_state_proof,
-        PreProcessedTraceVariant::CanonicalWithoutPedersenAndPoseidon,
+        PreProcessedTraceVariant::Canonical,
     )?;
 
     Ok(block_mmr_hash)

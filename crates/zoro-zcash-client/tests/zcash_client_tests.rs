@@ -1,6 +1,6 @@
 use hex::FromHex;
-use zcash_client::ZcashClient;
 use zebra_chain::transaction::Hash;
+use zoro_zcash_client::ZcashClient;
 #[tokio::test]
 async fn zcash_client_main_flow_like_example() {
     // Same parameters as `crates/zoro-zcash-client/src/main.rs`
