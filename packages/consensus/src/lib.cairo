@@ -6,6 +6,7 @@ pub mod types {
 pub mod validation {
     pub mod difficulty;
     pub mod equihash;
+    pub mod equihash_test;
     pub mod header;
     pub mod timestamp;
     pub mod work;
