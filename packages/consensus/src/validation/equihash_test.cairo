@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
     use core::array::ArrayTrait;
-    use utils::bit_shifts::{shl64, shr64};
-    use super::super::equihash::{is_valid_solution, is_valid_solution_indices};
+    use super::super::equihash::is_valid_solution_indices;
 
 
     // ---------------------------
@@ -66,79 +65,11 @@ mod tests {
         a
     }
 
-    // Bit-pack Equihash indices into minimal solution bytes, matching Zcash's
-    // GetMinimalFromIndices.
-    // - n, k: Equihash parameters
-    // - indices: Array<u32> of length 2^k
-    // - bits_per_index = (n/(k+1)) + 1
-    fn minimal_from_indices(n: u32, k: u32, indices: Array<u32>) -> Array<u8> {
-        let c_bit_len: u32 = n / (k + 1_u32);
-        let bits_per_index: u32 = c_bit_len + 1_u32;
-
-        let span = indices.span();
-        let len = indices.len();
-
-        let mut acc_value: u64 = 0_u64;
-        let mut acc_bits: u32 = 0_u32;
-
-        let mut out = array![];
-
-        let mut i: usize = 0_usize;
-        while i < len {
-            let idx_u32: u32 = *span.at(i);
-            let idx_u64: u64 = idx_u32.into();
-            let mask: u64 = shl64(1_u64, bits_per_index) - 1_u64;
-            let val: u64 = idx_u64 & mask;
-
-            // Append bits_per_index bits of val (MSB-first) to the accumulator.
-            acc_value = shl64(acc_value, bits_per_index) | val;
-            acc_bits = acc_bits + bits_per_index;
-
-            // Flush bytes while we have >= 8 bits.
-            while acc_bits >= 8_u32 {
-                let shift: u32 = acc_bits - 8_u32;
-                let byte_u64: u64 = shr64(acc_value, shift) & 0xff_u64;
-                let byte: u8 = byte_u64.try_into().unwrap();
-                out.append(byte);
-
-                // Remove those top 8 bits.
-                let mask_acc: u64 = if shift == 0_u32 {
-                    0_u64
-                } else {
-                    shl64(1_u64, shift) - 1_u64
-                };
-                acc_value = acc_value & mask_acc;
-                acc_bits = acc_bits - 8_u32;
-            }
-
-            i = i + 1_usize;
-        }
-
-        if acc_bits > 0_u32 {
-            let shift: u32 = 8_u32 - acc_bits;
-            let byte_u64: u64 = shl64(acc_value, shift) & 0xff_u64;
-            let byte: u8 = byte_u64.try_into().unwrap();
-            out.append(byte);
-        }
-
-        out
-    }
-
     // Convenience wrapper: validate solution indices directly.
     fn assert_valid_indices(
         n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
     ) {
         let ok = is_valid_solution_indices(n, k, input, nonce, indices);
-        assert(ok, 'zcash_valid_should_be_valid');
-    }
-
-    // Convenience wrapper: compute minimal bytes and validate via is_valid_solution.
-    // This tests the full pipeline including byte unpacking.
-    fn assert_valid_indices_via_bytes(
-        n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
-    ) {
-        let soln_bytes = minimal_from_indices(n, k, indices);
-        let ok = is_valid_solution(n, k, input, nonce, soln_bytes);
         assert(ok, 'zcash_valid_should_be_valid');
     }
 
@@ -1395,8 +1326,7 @@ mod tests {
     fn assert_invalid_indices(
         n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>, _msg: felt252,
     ) {
-        let soln_bytes = minimal_from_indices(n, k, indices);
-        let ok = is_valid_solution(n, k, input, nonce, soln_bytes);
+        let ok = is_valid_solution_indices(n, k, input, nonce, indices);
         assert(!ok, _msg);
     }
 

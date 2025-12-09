@@ -2,7 +2,7 @@
 // Equihash helpers on top of our Blake2b
 // =======================
 
-use consensus::params::{EQUIHASH_INDICES_TOTAL};
+use consensus::params::{EQUIHASH_INDICES_TOTAL, EQUIHASH_INDICES_MAX};
 use consensus::types::block::Header;
 use core::array::ArrayTrait;
 use core::traits::{Into, TryInto};
@@ -317,70 +317,6 @@ fn get_bit_be(bytes: Span<u8>, bit_index: usize) -> u8 {
 // Minimal decoder
 // =====================
 
-// Decode minimal-encoded solution bytes into indices,
-// like Rust `indices_from_minimal(p, soln)`.
-// Returns (ok, indices).
-fn indices_from_minimal_bytes(n: u32, k: u32, minimal: Array<u8>) -> (bool, Array<u32>) {
-    // Basic param checks (same as Params::new)
-    if n % 8_u32 != 0_u32 {
-        return (false, array![]);
-    }
-    if k < 3_u32 {
-        return (false, array![]);
-    }
-    if k >= n {
-        return (false, array![]);
-    }
-    let k1 = k + 1_u32;
-    if n % k1 != 0_u32 {
-        return (false, array![]);
-    }
-
-    let c_bits: u32 = collision_bit_length(n, k);
-    let bits_per_index: u32 = c_bits + 1_u32;
-
-    // expected length in bytes = (2^k * (c_bits+1))/8
-    let count_u32: u32 = pow32(k).try_into().unwrap();
-    let numerator_bits: u64 = (count_u32.into()) * (bits_per_index.into());
-    let expected_len_u32: u32 = (numerator_bits / 8_u64).try_into().unwrap();
-    let minimal_len: usize = minimal.len();
-
-    if minimal_len != expected_len_u32 {
-        return (false, array![]);
-    }
-
-    let indices_len: usize = count_u32;
-    let span = minimal.span();
-    let total_bits: usize = minimal_len * 8_usize;
-    let needed_bits: usize = count_u32 * bits_per_index;
-
-    if total_bits < needed_bits {
-        return (false, array![]);
-    }
-
-    let mut indices = array![];
-    let mut idx: usize = 0;
-    while idx < indices_len {
-        let mut value_u32: u32 = 0_u32;
-
-        let mut b: u32 = 0_u32;
-        while b < bits_per_index {
-            let global_bit_u64: u64 = idx.into() * bits_per_index.into() + b.into();
-            let global_bit: usize = global_bit_u64.try_into().unwrap();
-
-            let bit_val: u8 = get_bit_be(span, global_bit);
-            // value = (value << 1) | bit  (no <<)
-            value_u32 = value_u32 * 2_u32 + (bit_val.into());
-
-            b = b + 1_u32;
-        }
-
-        indices.append(value_u32);
-        idx = idx + 1_usize;
-    }
-
-    (true, indices)
-}
 // Expand an array of bytes into elements of size `bit_len` bits, each
 // output as `width = ceil(bit_len/8)` big-endian bytes.
 //
@@ -436,6 +372,22 @@ fn expand_array(bytes: Span<u8>, bit_len: u32) -> Array<u8> {
 // =====================
 // Indices-based validator
 // =====================
+
+/// Ensures that the solution indices are in the correct format:
+pub fn is_valid_solution_format(indices: Span<u32>) -> bool {
+    if indices.len() != EQUIHASH_INDICES_TOTAL {
+        return false;
+    }
+
+    // Check that indices are in range [0, 2^21)
+    for idx in indices {
+        if *idx > EQUIHASH_INDICES_MAX {
+            return false;
+        }
+    }
+
+    true
+}
 
 pub fn is_valid_solution_indices(
     n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
@@ -493,7 +445,7 @@ pub fn is_valid_solution_indices(
 /// Builds the Equihash input (block header without nonce & solution), converts the
 /// nonce into byte array, and runs the recursive Equihash validator with indices directly.
 pub fn check_equihash_solution(
-    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+    header: Header, prev_block_hash: Digest, txid_root: Digest,
 ) -> Result<(), ByteArray> {
     // let input = build_equihash_input(header, prev_block_hash, txid_root);
     // let nonce_bytes = digest_to_le_bytes(*header.nonce);
@@ -507,6 +459,9 @@ pub fn check_equihash_solution(
     //         ),
     //     );
     // }
+    if !is_valid_solution_format(header.indices) {
+        return Result::Err(format!("[equihash] invalid solution format"));
+    }
 
     // if is_valid_solution_indices(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, indices) {
     //     Result::Ok(())
@@ -514,22 +469,6 @@ pub fn check_equihash_solution(
     //     Result::Err(format!("[equihash] invalid solution"))
     // }
     Result::Ok(())
-}
-
-/// Cairo version of Rust:
-/// pub fn is_valid_solution(n, k, input, nonce, soln_bytes) -> Result<(), Error>
-/// Here we just return `bool`.
-pub fn is_valid_solution(
-    n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, soln: Array<u8>,
-) -> bool {
-    // Decode minimal-encoded solution bytes -> indices
-    let (ok_indices, indices) = indices_from_minimal_bytes(n, k, soln);
-    if !ok_indices {
-        return false;
-    }
-
-    // Recursive validation (like Rust is_valid_solution_recursive)
-    is_valid_solution_indices(n, k, input, nonce, indices)
 }
 
 // =====================

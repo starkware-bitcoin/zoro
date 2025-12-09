@@ -69,7 +69,7 @@ pub fn validate_header(
     let best_block_hash = block.header.hash(state.best_block_hash, txid_root);
     let pow_target_history = next_pow_targets(pow_history, current_target);
 
-    check_equihash_solution(@block.header, state.best_block_hash, txid_root)?;
+    check_equihash_solution(block.header, state.best_block_hash, txid_root)?;
     validate_proof_of_work(current_target, best_block_hash)?;
     validate_bits(current_target, block.header.bits)?;
 
