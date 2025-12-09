@@ -389,6 +389,127 @@ pub fn is_valid_solution_format(indices: Span<u32>) -> bool {
     true
 }
 
+// Prime modulus for permutation check: 2^64 - 59 (largest 64-bit prime)
+const PERMUTATION_PRIME: u128 = 18446744073709551557_u128;
+// Base for polynomial hash: prime > 2^21 (max index value)
+const PERMUTATION_BASE: u128 = 2097169_u128;
+
+/// Computes a deterministic Fiat-Shamir challenge from the indices.
+/// This derives a "random" value r from the input data itself.
+fn compute_permutation_challenge(indices: Span<u32>) -> u128 {
+    let mut hash: u128 = 0;
+    let mut power: u128 = 1;
+
+    for idx in indices {
+        let idx_val: u128 = (*idx).into();
+        hash = (hash + (idx_val * power) % PERMUTATION_PRIME) % PERMUTATION_PRIME;
+        power = (power * PERMUTATION_BASE) % PERMUTATION_PRIME;
+    };
+
+    // Add offset to ensure r > max possible index value
+    (hash + 10000000000_u128) % PERMUTATION_PRIME
+}
+
+/// Verifies that sorted_hint is a permutation of indices using the product check.
+/// Based on Schwartz-Zippel lemma: if ∏(r - indices[i]) == ∏(r - sorted_hint[i])
+/// for a random r, then the multisets are equal with overwhelming probability.
+fn verify_permutation(mut indices: Span<u32>, mut sorted_hint: Span<u32>, r: u128) -> bool {
+    let len = indices.len();
+
+    let mut prod_indices: u128 = 1;
+    let mut prod_sorted: u128 = 1;
+
+    let mut j: usize = 0;
+    while j < len {
+        let idx_val: u128 = (*indices.pop_front().unwrap()).into();
+        let sorted_val: u128 = (*sorted_hint.pop_front().unwrap()).into();
+
+        // Compute (r - idx_val) mod prime, handling potential underflow
+        let diff_idx = if r >= idx_val {
+            r - idx_val
+        } else {
+            PERMUTATION_PRIME - ((idx_val - r) % PERMUTATION_PRIME)
+        };
+
+        let diff_sorted = if r >= sorted_val {
+            r - sorted_val
+        } else {
+            PERMUTATION_PRIME - ((sorted_val - r) % PERMUTATION_PRIME)
+        };
+
+        prod_indices = (prod_indices * diff_idx) % PERMUTATION_PRIME;
+        prod_sorted = (prod_sorted * diff_sorted) % PERMUTATION_PRIME;
+
+        j += 1;
+    };
+
+    prod_indices == prod_sorted
+}
+
+/// Verifies that the span is strictly increasing (each element > previous).
+/// Uses pop_front for efficiency.
+fn is_strictly_increasing(mut span: Span<u32>) -> bool {
+    // Get first element, empty span is trivially increasing
+    let first = span.pop_front();
+    if first.is_none() {
+        return true;
+    }
+    let mut prev = *first.unwrap();
+
+    loop {
+        match span.pop_front() {
+            Option::Some(curr) => {
+                if prev >= *curr {
+                    break false;
+                }
+                prev = *curr;
+            },
+            Option::None => { break true; },
+        }
+    }
+}
+
+/// Verifies that all indices are unique using a sorted hint.
+///
+/// This is an O(n) algorithm that leverages the prover/verifier paradigm:
+/// - The prover provides a `sorted_indices_hint` containing the same indices but sorted
+/// - The verifier checks:
+///   1. The hint is strictly increasing (guarantees all hint values are unique)
+///   2. The hint is a permutation of the original indices (via product check)
+///
+/// If both conditions hold, the original indices must all be unique.
+///
+/// # Arguments
+/// * `indices` - The original Equihash solution indices (512 values)
+/// * `sorted_indices_hint` - Hint from prover: same indices but sorted ascending
+///
+/// # Returns
+/// * `true` if all indices are unique, `false` otherwise
+pub fn is_unique_indices(indices: Span<u32>, sorted_indices_hint: Span<u32>) -> bool {
+    let len = indices.len();
+
+    // Length check: hint must have same length as indices
+    if sorted_indices_hint.len() != len {
+        return false;
+    }
+
+    // Trivial cases: empty or single element is always unique
+    if len <= 1 {
+        return true;
+    }
+
+    // Step 1: Verify sorted_indices_hint is strictly increasing
+    // This guarantees all values in the hint are unique
+    if !is_strictly_increasing(sorted_indices_hint) {
+        return false;
+    }
+
+    // Step 2: Verify sorted_indices_hint is a permutation of indices
+    // Using Schwartz-Zippel product check with Fiat-Shamir challenge
+    let r = compute_permutation_challenge(indices);
+    verify_permutation(indices, sorted_indices_hint, r)
+}
+
 pub fn is_valid_solution_indices(
     n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
 ) -> bool {
@@ -444,8 +565,14 @@ pub fn is_valid_solution_indices(
 /// Mirrors `CheckEquihashSolution` from `src/pow/pow.cpp` in zcashd.
 /// Builds the Equihash input (block header without nonce & solution), converts the
 /// nonce into byte array, and runs the recursive Equihash validator with indices directly.
+///
+/// # Arguments
+/// * `header` - The block header containing the Equihash solution indices
+/// * `prev_block_hash` - Hash of the previous block
+/// * `txid_root` - Merkle root of transactions
+/// * `sorted_indices_hint` - Prover hint: the same indices sorted ascending (for O(n) uniqueness check)
 pub fn check_equihash_solution(
-    header: Header, prev_block_hash: Digest, txid_root: Digest,
+    header: Header, prev_block_hash: Digest, txid_root: Digest, sorted_indices_hint: Span<u32>,
 ) -> Result<(), ByteArray> {
     // let input = build_equihash_input(header, prev_block_hash, txid_root);
     // let nonce_bytes = digest_to_le_bytes(*header.nonce);
@@ -461,6 +588,10 @@ pub fn check_equihash_solution(
     // }
     if !is_valid_solution_format(header.indices) {
         return Result::Err(format!("[equihash] invalid solution format"));
+    }
+
+    if !is_unique_indices(header.indices, sorted_indices_hint) {
+        return Result::Err(format!("[equihash] duplicate indices in solution"));
     }
 
     // if is_valid_solution_indices(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, indices) {

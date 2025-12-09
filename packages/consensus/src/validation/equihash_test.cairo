@@ -1664,4 +1664,115 @@ mod tests {
         ];
         assert_invalid_indices(n, k, input, nonce, indices, 'err_duplicateidxs_08');
     }
+
+    // ===========================
+    // is_unique_indices tests
+    // ===========================
+
+    use super::super::equihash::is_unique_indices;
+
+    #[test]
+    fn test_is_unique_indices_valid_small() {
+        // Small test case: 4 unique indices
+        let indices = array![10_u32, 5_u32, 20_u32, 15_u32];
+        let sorted_hint = array![5_u32, 10_u32, 15_u32, 20_u32];
+        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "should be unique");
+    }
+
+    #[test]
+    fn test_is_unique_indices_valid_empty() {
+        // Empty arrays are trivially unique
+        let indices: Array<u32> = array![];
+        let sorted_hint: Array<u32> = array![];
+        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "empty should be unique");
+    }
+
+    #[test]
+    fn test_is_unique_indices_valid_single() {
+        // Single element is trivially unique
+        let indices = array![42_u32];
+        let sorted_hint = array![42_u32];
+        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "single should be unique");
+    }
+
+    #[test]
+    fn test_is_unique_indices_duplicate_in_original() {
+        // Duplicate in original indices - sorted hint will expose it
+        let indices = array![10_u32, 5_u32, 10_u32, 15_u32]; // 10 appears twice
+        let sorted_hint = array![5_u32, 10_u32, 10_u32, 15_u32]; // sorted correctly shows duplicate
+        // The strictly increasing check will fail because 10 == 10
+        assert!(!is_unique_indices(indices.span(), sorted_hint.span()), "duplicates should fail");
+    }
+
+    #[test]
+    fn test_is_unique_indices_wrong_sorted_order() {
+        // Sorted hint is not actually sorted
+        let indices = array![10_u32, 5_u32, 20_u32, 15_u32];
+        let sorted_hint = array![5_u32, 20_u32, 10_u32, 15_u32]; // not sorted
+        assert!(
+            !is_unique_indices(indices.span(), sorted_hint.span()), "wrong sort order should fail",
+        );
+    }
+
+    #[test]
+    fn test_is_unique_indices_wrong_permutation() {
+        // Sorted hint is sorted but contains different values
+        let indices = array![10_u32, 5_u32, 20_u32, 15_u32];
+        let sorted_hint = array![5_u32, 10_u32, 15_u32, 25_u32]; // 25 instead of 20
+        assert!(
+            !is_unique_indices(indices.span(), sorted_hint.span()), "wrong permutation should fail",
+        );
+    }
+
+    #[test]
+    fn test_is_unique_indices_length_mismatch() {
+        // Hint has different length
+        let indices = array![10_u32, 5_u32, 20_u32, 15_u32];
+        let sorted_hint = array![5_u32, 10_u32, 15_u32]; // missing one
+        assert!(
+            !is_unique_indices(indices.span(), sorted_hint.span()), "length mismatch should fail",
+        );
+    }
+
+    #[test]
+    fn test_is_unique_indices_valid_larger() {
+        // Larger test case: 16 unique indices
+        let indices = array![
+            100_u32, 50_u32, 200_u32, 150_u32, 25_u32, 175_u32, 75_u32, 125_u32, 10_u32, 190_u32,
+            60_u32, 140_u32, 30_u32, 170_u32, 80_u32, 110_u32,
+        ];
+        let sorted_hint = array![
+            10_u32, 25_u32, 30_u32, 50_u32, 60_u32, 75_u32, 80_u32, 100_u32, 110_u32, 125_u32,
+            140_u32, 150_u32, 170_u32, 175_u32, 190_u32, 200_u32,
+        ];
+        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "larger set should be unique");
+    }
+
+    #[test]
+    fn test_is_unique_indices_all_same() {
+        // All indices are the same (not unique)
+        let indices = array![42_u32, 42_u32, 42_u32, 42_u32];
+        let sorted_hint = array![42_u32, 42_u32, 42_u32, 42_u32];
+        assert!(!is_unique_indices(indices.span(), sorted_hint.span()), "all same should fail");
+    }
+
+    #[test]
+    fn test_is_unique_indices_consecutive() {
+        // Consecutive integers (all unique)
+        let indices = array![3_u32, 1_u32, 4_u32, 1_u32, 5_u32, 9_u32, 2_u32, 6_u32];
+        // Note: 1 appears twice, so sorted hint will have duplicate
+        let sorted_hint = array![1_u32, 1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32, 9_u32];
+        assert!(
+            !is_unique_indices(indices.span(), sorted_hint.span()),
+            "pi digits with duplicate should fail",
+        );
+    }
+
+    #[test]
+    fn test_is_unique_indices_max_values() {
+        // Test with max u32 values near the Equihash limit (2^21 - 1 = 2097151)
+        let indices = array![2097150_u32, 2097151_u32, 0_u32, 1_u32];
+        let sorted_hint = array![0_u32, 1_u32, 2097150_u32, 2097151_u32];
+        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "max values should work");
+    }
 }

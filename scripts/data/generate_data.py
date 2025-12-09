@@ -486,6 +486,17 @@ def format_solution(solution_hex: str) -> list[int]:
     return indices
 
 
+def get_sorted_indices_hint(indices: list[int]) -> list[int]:
+    """Generate sorted indices hint for O(n) uniqueness verification.
+
+    The prover provides a sorted version of the indices as a hint.
+    The verifier then checks:
+    1. The hint is strictly increasing (guarantees uniqueness)
+    2. The hint is a permutation of the original (via product check)
+    """
+    return sorted(indices)
+
+
 def next_chain_state(current_state: dict, new_block: dict) -> dict:
     """Computes the next chain state given the current state and a new block."""
     next_state = new_block.copy()
@@ -563,10 +574,18 @@ def generate_data(
         logger.info(f"Fetched block {initial_height + i + 1} {i + 1}/{num_blocks}")
 
     formatted_blocks = list(map(format_block, blocks))
+
+    # Generate sorted indices hints for each block (for O(n) uniqueness verification)
+    sorted_indices_hints = []
+    for block in formatted_blocks:
+        indices = block["header"]["indices"]
+        sorted_indices_hints.append(get_sorted_indices_hint(indices))
+
     result = {
         "chain_state": format_chain_state(initial_chain_state),
         "blocks": formatted_blocks,
         "expected": format_chain_state(chain_state),
+        "sorted_indices_hints": sorted_indices_hints,
     }
 
     if formatted_blocks:
