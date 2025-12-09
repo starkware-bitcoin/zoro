@@ -7,7 +7,6 @@
 use consensus::params::{EQUIHASH_INDICES_TOTAL, EQUIHASH_SOLUTION_SIZE_BYTES};
 use core::fmt::{Display, Error, Formatter};
 use core::traits::DivRem;
-use utils::bit_shifts::{shl64, shr64};
 use utils::blake2s_hasher::{Blake2sDigest, Blake2sHasher};
 use utils::double_sha256::double_sha256_word_array;
 use utils::hash::Digest;
@@ -329,7 +328,7 @@ fn append_solution_bytes(mut indices: Span<u32>, ref words: WordArray) {
             (*indices.pop_front().unwrap()).into() * 4398046511104 +
             (*indices.pop_front().unwrap()).into() * 2097152 +
             (*indices.pop_front().unwrap()).into();
-        words.append_bytes(chunk, 21);
+        words.append_bytes_21(chunk);
         start_idx = start_idx + 8;
     }
 }
