@@ -105,8 +105,8 @@ fn get_prev_result(proof: CairoProof) -> Result {
     assert(serialized_bootloader_output.is_empty(), 'Output too long');
     assert(n_tasks == 1, 'Unexpected number of tasks');
     assert(
-        task_output_size == 8, 'Unexpected task output size',
-    ); // 1 felt for program hash, 6 for output, 1 for the size
+        task_output_size == 6, 'Unexpected task output size',
+    ); // 1 felt for program hash, 4 for output, 1 for the size
 
     // Check that the task bootloader hash and program hash is the same as
     // the previous bootloader hash and program hash. In case of the genesis state,

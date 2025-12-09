@@ -113,11 +113,13 @@ pub async fn generate_assumevalid_args(
     debug!("Fetched {} block headers", block_headers.len());
 
     let chain_state_proof = if let Some(path) = &params.chain_state_proof_path {
+        println!("Deserializing proof from {}", path.display());
         Some(deserialize_proof_from_file::<Blake2sMerkleHasher>(
             path,
             ProofFormat::CairoSerde,
         )?)
     } else {
+        println!("No proof wtf");
         None
     };
 
