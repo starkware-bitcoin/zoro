@@ -9,12 +9,11 @@
 // - No bitshift operators (<<, >>); uses Pow + DivRem instead.
 
 use core::array::ArrayTrait;
+#[cfg(feature: "blake2b")]
+use core::blake::{Blake2bHasherTrait, Blake2bParamsTrait};
 use core::num::traits::WrappingAdd;
 use core::traits::{Into, TryInto};
 use crate::bit_shifts::{shl64, shr64};
-
-#[cfg(feature: "blake2b")]
-use core::blake::{Blake2bHasherTrait, Blake2bParamsTrait};
 
 pub type Blake2bDigest = Array<u8>;
 
@@ -458,7 +457,7 @@ pub fn blake2b_hash(_input: Array<u8>, outlen: u32, _personalization: [u8; 16]) 
     while i < outlen {
         out.append(0_u8);
         i += 1;
-    };
+    }
     out
 }
 
@@ -490,13 +489,23 @@ pub fn blake2b_hash(input: Array<u8>, outlen: u32, personalization: [u8; 16]) ->
 pub fn personalization_to_u64_pair(personal: [u8; 16]) -> [u64; 2] {
     let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = personal;
 
-    let word0: u64 = b0.into() + shl64(b1.into(), 8) + shl64(b2.into(), 16)
-        + shl64(b3.into(), 24) + shl64(b4.into(), 32) + shl64(b5.into(), 40)
-        + shl64(b6.into(), 48) + shl64(b7.into(), 56);
+    let word0: u64 = b0.into()
+        + shl64(b1.into(), 8)
+        + shl64(b2.into(), 16)
+        + shl64(b3.into(), 24)
+        + shl64(b4.into(), 32)
+        + shl64(b5.into(), 40)
+        + shl64(b6.into(), 48)
+        + shl64(b7.into(), 56);
 
-    let word1: u64 = b8.into() + shl64(b9.into(), 8) + shl64(b10.into(), 16)
-        + shl64(b11.into(), 24) + shl64(b12.into(), 32) + shl64(b13.into(), 40)
-        + shl64(b14.into(), 48) + shl64(b15.into(), 56);
+    let word1: u64 = b8.into()
+        + shl64(b9.into(), 8)
+        + shl64(b10.into(), 16)
+        + shl64(b11.into(), 24)
+        + shl64(b12.into(), 32)
+        + shl64(b13.into(), 40)
+        + shl64(b14.into(), 48)
+        + shl64(b15.into(), 56);
 
     [word0, word1]
 }
@@ -524,10 +533,14 @@ pub fn state_to_bytes(state: [u64; 8], outlen: u32) -> Array<u8> {
         if remaining == 0 {
             break;
         }
-        let count = if remaining >= 8 { 8 } else { remaining };
+        let count = if remaining >= 8 {
+            8
+        } else {
+            remaining
+        };
         append_u64_le_bytes(ref out, *word, count);
         remaining -= count;
-    };
+    }
 
     out
 }

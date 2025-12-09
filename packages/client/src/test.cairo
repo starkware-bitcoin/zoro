@@ -67,8 +67,6 @@ impl ArgsSerde of Serde<Args> {
         let sorted_indices_hints: Span<Span<u32>> = Serde::deserialize(ref serialized)
             .expect('sorted_indices_hints');
 
-        Option::Some(
-            Args { chain_state, blocks, expected_chain_state, sorted_indices_hints },
-        )
+        Option::Some(Args { chain_state, blocks, expected_chain_state, sorted_indices_hints })
     }
 }

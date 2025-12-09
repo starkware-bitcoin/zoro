@@ -78,7 +78,7 @@ pub const EQUIHASH_HASH_OUTPUT_LENGTH: u8 = 50;
 /// Represents: "ZcashPoW" (8 bytes) + n=200 as LE u32 + k=9 as LE u32
 pub const EQUIHASH_PERSONALIZATION: [u64; 2] = [
     0x576f50687361635a_u64, // "ZcashPoW" as LE u64
-    0x00000009000000c8_u64, // n=200, k=9 as LE u32s
+    0x00000009000000c8_u64 // n=200, k=9 as LE u32s
 ];
 
 // =============================================================================

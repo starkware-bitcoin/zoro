@@ -2,20 +2,19 @@
 // Equihash helpers on top of our Blake2b
 // =======================
 
-use consensus::params::{EQUIHASH_INDICES_TOTAL, EQUIHASH_INDICES_MAX, EQUIHASH_N, EQUIHASH_K};
-use consensus::types::block::Header;
-use core::array::ArrayTrait;
-use core::traits::{Into, TryInto};
-use utils::bit_shifts::{pow32, shl64, shr64};
-use utils::blake2b::blake2b_hash;
-use utils::hash::Digest;
-
 #[cfg(feature: "blake2b")]
 use consensus::params::{EQUIHASH_HASH_OUTPUT_LENGTH, EQUIHASH_PERSONALIZATION};
+use consensus::params::{EQUIHASH_INDICES_MAX, EQUIHASH_INDICES_TOTAL, EQUIHASH_K, EQUIHASH_N};
+use consensus::types::block::Header;
+use core::array::ArrayTrait;
 #[cfg(feature: "blake2b")]
 use core::blake::{Blake2bHasher, Blake2bHasherTrait, Blake2bParamsTrait};
 #[cfg(feature: "blake2b")]
 use core::traits::DivRem;
+use core::traits::{Into, TryInto};
+use utils::bit_shifts::{pow32, shl64, shr64};
+use utils::blake2b::blake2b_hash;
+use utils::hash::Digest;
 
 // 512-bit Blake2b output split into n-bit chunks
 fn equihash_indices_per_hash_output(n: u32) -> u32 {
@@ -263,9 +262,7 @@ fn extract_bytes_from_u64(w: u64) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
 /// Extract 10 u32 elements (20-bit each) directly from blake2b u64 state.
 /// For Zcash (n=200, k=9): produces 10 elements from 25 bytes (200 bits).
 #[cfg(feature: "blake2b")]
-fn extract_elements_from_state_u32(
-    state: Box<[u64; 8]>, subindex: u32,
-) -> Array<u32> {
+fn extract_elements_from_state_u32(state: Box<[u64; 8]>, subindex: u32) -> Array<u32> {
     let [w0, w1, w2, w3, w4, w5, w6, _w7] = state.unbox();
 
     if subindex == 0 {
@@ -352,9 +349,7 @@ fn extract_elements_subindex1(w3: u64, w4: u64, w5: u64, w6: u64) -> Array<u32> 
 /// Creates a leaf node using the cached base hasher, storing hash as u32 array.
 /// This bypasses expand_array entirely by extracting u32 elements directly.
 #[cfg(feature: "blake2b")]
-fn make_leaf_cached_u32(
-    base_hasher: @Blake2bHasher, n: u32, idx: u32,
-) -> OptimizedNodeU32 {
+fn make_leaf_cached_u32(base_hasher: @Blake2bHasher, n: u32, idx: u32) -> OptimizedNodeU32 {
     let indices_per: u32 = equihash_indices_per_hash_output(n);
 
     // Which Blake2b invocation and which chunk?
@@ -388,9 +383,7 @@ fn indices_before_u32(a: @OptimizedNodeU32, b: @OptimizedNodeU32) -> bool {
 
 /// Merge two u32 nodes: XOR hash elements after trimming first element.
 /// For Zcash, trim=collision_bytes=3 corresponds to skipping 1 element.
-fn from_children_u32(
-    mut a: OptimizedNodeU32, mut b: OptimizedNodeU32,
-) -> OptimizedNodeU32 {
+fn from_children_u32(mut a: OptimizedNodeU32, mut b: OptimizedNodeU32) -> OptimizedNodeU32 {
     let mut ha = a.hash.span();
     let mut hb = b.hash.span();
 
@@ -402,7 +395,7 @@ fn from_children_u32(
     let mut hash: Array<u32> = array![];
     while let (Option::Some(ea), Option::Some(eb)) = (ha.pop_front(), hb.pop_front()) {
         hash.append(*ea ^ *eb);
-    };
+    }
 
     let min_index = if a.min_index < b.min_index {
         a.min_index
@@ -420,7 +413,7 @@ fn is_zero_root_u32(node: OptimizedNodeU32) -> bool {
     let mut h = node.hash.span();
     match h.pop_front() {
         Option::Some(elem) => *elem == 0_u32,
-        Option::None => true, // Empty hash is considered zero
+        Option::None => true // Empty hash is considered zero
     }
 }
 
@@ -428,12 +421,7 @@ fn is_zero_root_u32(node: OptimizedNodeU32) -> bool {
 /// This is the most efficient path: no expand_array, u32 operations for collision/XOR.
 #[cfg(feature: "blake2b")]
 fn tree_validator_cached_u32(
-    n: u32,
-    k: u32,
-    base_hasher: @Blake2bHasher,
-    indices_span: Span<u32>,
-    start: usize,
-    end: usize,
+    n: u32, k: u32, base_hasher: @Blake2bHasher, indices_span: Span<u32>, start: usize, end: usize,
 ) -> (bool, OptimizedNodeU32) {
     let count = end - start;
 
@@ -937,7 +925,8 @@ pub fn is_valid_solution_indices(
 /// * `header` - The block header containing the Equihash solution indices
 /// * `prev_block_hash` - Hash of the previous block
 /// * `txid_root` - Merkle root of transactions
-/// * `sorted_indices_hint` - Prover hint: the same indices sorted ascending (for O(n) uniqueness check)
+/// * `sorted_indices_hint` - Prover hint: the same indices sorted ascending (for O(n) uniqueness
+/// check)
 pub fn check_equihash_solution(
     header: Header, prev_block_hash: Digest, txid_root: Digest, sorted_indices_hint: Span<u32>,
 ) -> Result<(), ByteArray> {

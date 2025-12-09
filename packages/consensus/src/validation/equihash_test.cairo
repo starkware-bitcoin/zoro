@@ -1745,7 +1745,9 @@ mod tests {
             10_u32, 25_u32, 30_u32, 50_u32, 60_u32, 75_u32, 80_u32, 100_u32, 110_u32, 125_u32,
             140_u32, 150_u32, 170_u32, 175_u32, 190_u32, 200_u32,
         ];
-        assert!(is_unique_indices(indices.span(), sorted_hint.span()), "larger set should be unique");
+        assert!(
+            is_unique_indices(indices.span(), sorted_hint.span()), "larger set should be unique",
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@ use utils::hash::Digest;
 /// # Arguments
 /// * `state` - Current chain state
 /// * `block` - Block to validate
-/// * `sorted_indices_hint` - Prover hint: Equihash indices sorted ascending (for O(n) uniqueness check)
+/// * `sorted_indices_hint` - Prover hint: Equihash indices sorted ascending (for O(n) uniqueness
+/// check)
 pub fn validate_block_header(
     state: ChainState, block: Block, sorted_indices_hint: Span<u32>,
 ) -> Result<ChainState, ByteArray> {
