@@ -220,7 +220,7 @@ struct HeaderView {
 pub fn to_runner_args_hex(
     chain_state: ChainState,
     headers: &[Header],
-    expected_chain_state: ChainState,
+    chain_state_proof: Option<CairoProof<Blake2sMerkleHasher>>,
 ) -> Vec<String> {
     // Convert headers to BlockView
     let blocks: Vec<BlockView> = headers
@@ -272,7 +272,7 @@ pub fn to_runner_args_hex(
     let args_view = ArgsView {
         chain_state: chain_state_view,
         blocks,
-        chain_state_proof: None,
+        chain_state_proof,
     };
 
     let mut felts = Vec::new();

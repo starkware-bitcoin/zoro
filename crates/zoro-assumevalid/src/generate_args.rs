@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::adapters::to_runner_args_hex;
 use anyhow::{anyhow, Result};
+use cairo_air::utils::{deserialize_proof_from_file, ProofFormat};
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use tracing::debug;
 use zebra_chain::block::Header as BlockHeader;
 use zoro_spv_verify::ChainState;
@@ -110,13 +112,17 @@ pub async fn generate_assumevalid_args(
         .await?;
     debug!("Fetched {} block headers", block_headers.len());
 
-    // Fetch expected chain state after applying blocks
-    let end_height = params.start_height + params.block_count;
-    let expected_chain_state = client.get_chain_state(end_height).await?;
-    debug!("Fetched expected chain state for height {}", end_height);
+    let chain_state_proof = if let Some(path) = &params.chain_state_proof_path {
+        Some(deserialize_proof_from_file::<Blake2sMerkleHasher>(
+            path,
+            ProofFormat::CairoSerde,
+        )?)
+    } else {
+        None
+    };
 
     // Generate Cairo-compatible arguments
-    let cairo_args = to_runner_args_hex(chain_state, &block_headers, expected_chain_state);
+    let cairo_args = to_runner_args_hex(chain_state, &block_headers, chain_state_proof);
 
     debug!("Generated {} Cairo arguments", cairo_args.len());
 
