@@ -10,6 +10,10 @@ use utils::bit_shifts::{pow32, shl64, shr64};
 use utils::blake2b::blake2b_hash;
 use utils::hash::Digest;
 
+#[cfg(feature: "blake2b")]
+use consensus::params::{EQUIHASH_HASH_OUTPUT_LENGTH, EQUIHASH_PERSONALIZATION};
+#[cfg(feature: "blake2b")]
+use core::blake::{Blake2bHasher, Blake2bHasherTrait, Blake2bParamsTrait};
 
 // 512-bit Blake2b output split into n-bit chunks
 fn equihash_indices_per_hash_output(n: u32) -> u32 {
@@ -496,6 +500,75 @@ pub fn is_unique_indices(indices: Span<u32>, sorted_indices_hint: Span<u32>) -> 
     verify_permutation(indices, sorted_indices_hint, r)
 }
 
+// For each block, all 512 leaf hashes share the same:
+//   - Personalization ("ZcashPoW" + n + k)
+//   - Hash length (50 bytes for Zcash n=200, k=9)
+//   - Common input prefix (header = 140 bytes)
+//
+// By pre-computing a "base hasher" with these common elements, we:
+//   1. Compute the initial state (IV XOR params) only once
+//   2. Process the first 128 bytes (first compression block) only once
+//   3. For each leaf, clone the hasher and only process the remaining 12 bytes + 4-byte index
+fn build_equihash_header_bytes(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Array<u8> {
+    let mut bytes: Array<u8> = array![];
+
+    append_u32_le(ref bytes, *header.version);
+    append_digest(ref bytes, prev_block_hash);
+    append_digest(ref bytes, txid_root);
+    append_digest(ref bytes, *header.final_sapling_root);
+    append_u32_le(ref bytes, *header.time);
+    append_u32_le(ref bytes, *header.bits);
+    append_digest(ref bytes, *header.nonce);
+
+    bytes
+}
+
+/// Builds a base hasher pre-configured for Equihash with the full 140-byte header.
+/// The header is: version(4) + prev_block_hash(32) + txid_root(32) + final_sapling_root(32)
+///                + time(4) + bits(4) + nonce(32) = 140 bytes
+///
+/// Clone this hasher for each leaf hash, then update with just the 4-byte index.
+#[cfg(feature: "blake2b")]
+fn build_equihash_base_hasher(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Blake2bHasher {
+    // Create hasher with precomputed Equihash parameters (n=200, k=9)
+    let mut hasher = Blake2bParamsTrait::new()
+        .hash_length(EQUIHASH_HASH_OUTPUT_LENGTH)
+        .personal(EQUIHASH_PERSONALIZATION)
+        .to_state();
+
+    // Build the 140-byte header and process it
+    // This compresses the first block (128 bytes) and buffers the remaining 12 bytes
+    let header_bytes = build_equihash_header_bytes(header, prev_block_hash, txid_root);
+    hasher.update_span(header_bytes.span());
+
+    hasher
+}
+
+#[cfg(feature: "blake2b")]
+pub fn wagner_tree_validator(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Result<(), ByteArray> {
+    let _base_hasher = build_equihash_base_hasher(header, prev_block_hash, txid_root);
+
+    // TODO: Implement the rest of the Wagner tree validation using base_hasher
+    // For each leaf, clone base_hasher and update with the 4-byte index
+
+    Result::Ok(())
+}
+
+/// Fallback wagner_tree_validator when blake2b feature is not enabled.
+#[cfg(not(feature: "blake2b"))]
+pub fn wagner_tree_validator(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Result<(), ByteArray> {
+    // TODO: Implement using the non-cached path
+    Result::Ok(())
+}
+
 pub fn is_valid_solution_indices(
     n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
 ) -> bool {
@@ -548,7 +621,6 @@ pub fn is_valid_solution_indices(
 // Public API: header-level helpers
 // =====================
 
-/// Mirrors `CheckEquihashSolution` from `src/pow/pow.cpp` in zcashd.
 /// Builds the Equihash input (block header without nonce & solution), converts the
 /// nonce into byte array, and runs the recursive Equihash validator with indices directly.
 ///
@@ -560,18 +632,6 @@ pub fn is_valid_solution_indices(
 pub fn check_equihash_solution(
     header: Header, prev_block_hash: Digest, txid_root: Digest, sorted_indices_hint: Span<u32>,
 ) -> Result<(), ByteArray> {
-    // let input = build_equihash_input(header, prev_block_hash, txid_root);
-    // let nonce_bytes = digest_to_le_bytes(*header.nonce);
-
-    // if (*header.indices).len() != EQUIHASH_INDICES_TOTAL {
-    //     return Result::Err(
-    //         format!(
-    //             "[equihash] invalid indices count: expected {}, got {}",
-    //             expected_indices,
-    //             (*header.indices).len(),
-    //         ),
-    //     );
-    // }
     if !is_valid_solution_format(header.indices) {
         return Result::Err(format!("[equihash] invalid solution format"));
     }
@@ -580,12 +640,10 @@ pub fn check_equihash_solution(
         return Result::Err(format!("[equihash] duplicate indices in solution"));
     }
 
-    // if is_valid_solution_indices(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, indices) {
-    //     Result::Ok(())
-    // } else {
-    //     Result::Err(format!("[equihash] invalid solution"))
-    // }
-    Result::Ok(())
+    match wagner_tree_validator(@header, prev_block_hash, txid_root) {
+        Result::Ok(()) => Result::Ok(()),
+        Result::Err(e) => Result::Err(e),
+    }
 }
 
 // =====================
