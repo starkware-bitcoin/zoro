@@ -162,6 +162,9 @@ struct ArgsView {
     chain_state: ChainStateView,
     blocks: Vec<BlockView>,
     chain_state_proof: Option<CairoProof<Blake2sMerkleHasher>>,
+    /// Sorted indices hints for each block (for O(n) Equihash uniqueness verification).
+    /// Each hint contains the same 512 indices as the block's solution, but sorted ascending.
+    sorted_indices_hints: Vec<Vec<u32>>,
 }
 
 /// View matching Cairo `ChainState` layout from consensus/src/types/chain_state.cairo
@@ -221,8 +224,8 @@ pub fn to_runner_args_hex(
     chain_state: ChainState,
     headers: &[Header],
     chain_state_proof: Option<CairoProof<Blake2sMerkleHasher>>,
+    sorted_indices_hints: Vec<Vec<u32>>,
 ) -> Vec<String> {
-    // Convert headers to BlockView
     let blocks: Vec<BlockView> = headers
         .iter()
         .map(|header| {
@@ -273,6 +276,7 @@ pub fn to_runner_args_hex(
         chain_state: chain_state_view,
         blocks,
         chain_state_proof,
+        sorted_indices_hints,
     };
 
     let mut felts = Vec::new();
@@ -325,7 +329,63 @@ fn extract_solution_words(solution_bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Extract 21-bit Equihash indices from minimal-encoded solution bytes.
+///
+/// For Zcash mainnet (n=200, k=9), this extracts 512 indices of 21 bits each
+/// from the 1344-byte minimal-encoded solution (big-endian bitstream).
+pub fn extract_equihash_indices(solution_bytes: &[u8]) -> Vec<u32> {
+    const BITS_PER_INDEX: usize = 21;
+    const NUM_INDICES: usize = 512;
+
+    let mut indices = Vec::with_capacity(NUM_INDICES);
+
+    for idx in 0..NUM_INDICES {
+        let mut value: u32 = 0;
+        for b in 0..BITS_PER_INDEX {
+            let global_bit = idx * BITS_PER_INDEX + b;
+            let byte_index = global_bit / 8;
+            let bit_in_byte = global_bit % 8;
+            // Big-endian: bit 0 is MSB of byte
+            let bit_val = (solution_bytes[byte_index] >> (7 - bit_in_byte)) & 1;
+            value = (value << 1) | (bit_val as u32);
+        }
+        indices.push(value);
+    }
+
+    indices
+}
+
 fn bytes_to_decimal_string(bytes: &[u8; 32]) -> String {
     let big_uint = BigUint::from_bytes_be(bytes);
     big_uint.to_str_radix(10)
+}
+
+/// Generate sorted indices hints from block headers.
+///
+/// For each header, extracts the Equihash solution indices and returns them sorted.
+/// This is used as a hint for O(n) uniqueness verification in Cairo.
+pub fn generate_sorted_indices_hints(headers: &[Header]) -> Vec<Vec<u32>> {
+    headers
+        .iter()
+        .map(|header| {
+            // Serialize solution to get bytes
+            let mut solution_bytes = Vec::new();
+            header
+                .solution
+                .zcash_serialize(&mut solution_bytes)
+                .expect("solution serialization failed");
+
+            // Skip the compact size prefix (1-3 bytes depending on size)
+            let solution_data = if solution_bytes.len() > 1344 {
+                &solution_bytes[solution_bytes.len() - 1344..]
+            } else {
+                &solution_bytes[..]
+            };
+
+            // Extract indices and sort them
+            let mut indices = extract_equihash_indices(solution_data);
+            indices.sort();
+            indices
+        })
+        .collect()
 }

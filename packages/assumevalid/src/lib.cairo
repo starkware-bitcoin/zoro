@@ -17,6 +17,9 @@ struct Args {
     /// Proof of the previous chain state transition.
     /// If set to None, the chain state is assumed to be the genesis state.
     chain_state_proof: Option<CairoProof>,
+    /// Sorted indices hints for each block (for O(n) Equihash uniqueness verification).
+    /// Each hint contains the same 512 indices as the block's solution, but sorted ascending.
+    sorted_indices_hints: Span<Span<u32>>,
 }
 
 #[derive(Drop, Serde)]
@@ -46,9 +49,12 @@ struct BootloaderOutput {
 
 #[executable]
 fn main(
-    chain_state: ChainState, blocks: Array<Block>, chain_state_proof: Option<CairoProof>,
+    chain_state: ChainState,
+    blocks: Array<Block>,
+    chain_state_proof: Option<CairoProof>,
+    sorted_indices_hints: Span<Span<u32>>,
 ) -> Result {
-    // let Args { chain_state, blocks, chain_state_proof } = args;
+    // let Args { chain_state, blocks, chain_state_proof, sorted_indices_hints } = args;
 
     let mut prev_result = if let Some(proof) = chain_state_proof {
         let res = get_prev_result(proof);
@@ -68,11 +74,13 @@ fn main(
     };
 
     let mut current_chain_state = chain_state;
+    let mut hints_span = sorted_indices_hints;
 
     // Validate the blocks and update the current chain state
     for block in blocks {
+        let sorted_hint = *hints_span.pop_front().expect('missing sorted_indices_hint');
         // Validate the block header
-        match validate_block_header(current_chain_state, block) {
+        match validate_block_header(current_chain_state, block, sorted_hint) {
             Ok(new_chain_state) => { current_chain_state = new_chain_state; },
             Err(err) => panic!("FAIL: error='{}'", err),
         };

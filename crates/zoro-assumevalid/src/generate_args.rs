@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::adapters::to_runner_args_hex;
+use crate::adapters::{generate_sorted_indices_hints, to_runner_args_hex};
 use anyhow::{anyhow, Result};
 use cairo_air::utils::{deserialize_proof_from_file, ProofFormat};
 use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
@@ -123,8 +123,16 @@ pub async fn generate_assumevalid_args(
         None
     };
 
+    // Generate sorted indices hints from headers
+    let sorted_indices_hints = generate_sorted_indices_hints(&block_headers);
+
     // Generate Cairo-compatible arguments
-    let cairo_args = to_runner_args_hex(chain_state, &block_headers, chain_state_proof);
+    let cairo_args = to_runner_args_hex(
+        chain_state,
+        &block_headers,
+        chain_state_proof,
+        sorted_indices_hints,
+    );
 
     debug!("Generated {} Cairo arguments", cairo_args.len());
 
