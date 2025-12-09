@@ -2,7 +2,7 @@
 mod tests {
     use core::array::ArrayTrait;
     use utils::bit_shifts::{shl64, shr64};
-    use super::super::equihash::is_valid_solution;
+    use super::super::equihash::{is_valid_solution, is_valid_solution_indices};
 
 
     // ---------------------------
@@ -124,8 +124,17 @@ mod tests {
         out
     }
 
-    // Convenience wrapper: compute minimal bytes and validate.
+    // Convenience wrapper: validate solution indices directly.
     fn assert_valid_indices(
+        n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
+    ) {
+        let ok = is_valid_solution_indices(n, k, input, nonce, indices);
+        assert(ok, 'zcash_valid_should_be_valid');
+    }
+
+    // Convenience wrapper: compute minimal bytes and validate via is_valid_solution.
+    // This tests the full pipeline including byte unpacking.
+    fn assert_valid_indices_via_bytes(
         n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
     ) {
         let soln_bytes = minimal_from_indices(n, k, indices);

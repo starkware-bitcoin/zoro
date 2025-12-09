@@ -70,6 +70,7 @@ pub const EQUIHASH_N: u32 = 200;
 pub const EQUIHASH_K: u32 = 9;
 pub const EQUIHASH_SOLUTION_SIZE_BYTES: usize = 1344;
 pub const EQUIHASH_SOLUTION_WORDS: usize = EQUIHASH_SOLUTION_SIZE_BYTES / 4;
+pub const EQUIHASH_INDICES_TOTAL: usize = 512;
 
 // =============================================================================
 // Block timing parameters

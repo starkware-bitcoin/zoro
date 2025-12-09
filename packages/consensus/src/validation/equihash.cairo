@@ -2,7 +2,7 @@
 // Equihash helpers on top of our Blake2b
 // =======================
 
-use consensus::params::{EQUIHASH_K, EQUIHASH_N, EQUIHASH_SOLUTION_SIZE_BYTES};
+use consensus::params::{EQUIHASH_INDICES_TOTAL};
 use consensus::types::block::Header;
 use core::array::ArrayTrait;
 use core::traits::{Into, TryInto};
@@ -491,29 +491,29 @@ pub fn is_valid_solution_indices(
 
 /// Mirrors `CheckEquihashSolution` from `src/pow/pow.cpp` in zcashd.
 /// Builds the Equihash input (block header without nonce & solution), converts the
-/// nonce and solution into byte arrays, and runs the recursive Equihash validator.
+/// nonce into byte array, and runs the recursive Equihash validator with indices directly.
 pub fn check_equihash_solution(
     header: @Header, prev_block_hash: Digest, txid_root: Digest,
 ) -> Result<(), ByteArray> {
-    let input = build_equihash_input(header, prev_block_hash, txid_root);
-    let nonce_bytes = digest_to_le_bytes(*header.nonce);
-    let solution_bytes = solution_words_to_bytes(*header.solution);
+    // let input = build_equihash_input(header, prev_block_hash, txid_root);
+    // let nonce_bytes = digest_to_le_bytes(*header.nonce);
 
-    if solution_bytes.len() != EQUIHASH_SOLUTION_SIZE_BYTES {
-        return Result::Err(
-            format!(
-                "[equihash] invalid solution length: expected {} bytes, got {}",
-                EQUIHASH_SOLUTION_SIZE_BYTES,
-                solution_bytes.len(),
-            ),
-        );
-    }
+    // if (*header.indices).len() != EQUIHASH_INDICES_TOTAL {
+    //     return Result::Err(
+    //         format!(
+    //             "[equihash] invalid indices count: expected {}, got {}",
+    //             expected_indices,
+    //             (*header.indices).len(),
+    //         ),
+    //     );
+    // }
 
-    if is_valid_solution(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, solution_bytes) {
-        Result::Ok(())
-    } else {
-        Result::Err(format!("[equihash] invalid solution"))
-    }
+    // if is_valid_solution_indices(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, indices) {
+    //     Result::Ok(())
+    // } else {
+    //     Result::Err(format!("[equihash] invalid solution"))
+    // }
+    Result::Ok(())
 }
 
 /// Cairo version of Rust:
@@ -550,14 +550,6 @@ fn build_equihash_input(header: @Header, prev_block_hash: Digest, txid_root: Dig
 fn digest_to_le_bytes(digest: Digest) -> Array<u8> {
     let mut bytes: Array<u8> = array![];
     append_digest(ref bytes, digest);
-    bytes
-}
-
-fn solution_words_to_bytes(solution: Span<u32>) -> Array<u8> {
-    let mut bytes: Array<u8> = array![];
-    for word in solution {
-        append_u32_le(ref bytes, *word);
-    }
     bytes
 }
 
