@@ -215,8 +215,8 @@ struct HeaderView {
     pub bits: u32,
     /// 256-bit nonce (32 bytes as 8 u32 words)
     pub nonce: DigestString,
-    /// Equihash solution words
-    pub solution: Vec<u32>,
+    /// Equihash solution indices (512 x 21-bit indices for n=200, k=9)
+    pub indices: Vec<u32>,
 }
 
 /// Main adapter function for test.cairo Args
@@ -232,7 +232,7 @@ pub fn to_runner_args_hex(
             // Extract bits from difficulty_threshold
             let bits = u32::from_be_bytes(header.difficulty_threshold.bytes_in_display_order());
 
-            // Serialize solution to get bytes, then convert to u32 words
+            // Serialize solution to get bytes, then extract 21-bit indices
             let mut solution_bytes = Vec::new();
             header
                 .solution
@@ -245,7 +245,7 @@ pub fn to_runner_args_hex(
             } else {
                 &solution_bytes[..]
             };
-            let solution_words = extract_solution_words(solution_data);
+            let indices = extract_equihash_indices(solution_data);
 
             // Nonce needs byte reversal: internal order -> display order
             let nonce_reversed: Vec<u8> = header.nonce.0.iter().rev().cloned().collect();
@@ -261,7 +261,7 @@ pub fn to_runner_args_hex(
                     time: header.time.timestamp() as u32,
                     bits,
                     nonce: DigestString(hex::encode(&nonce_reversed)),
-                    solution: solution_words,
+                    indices,
                 },
                 data: TransactionDataView {
                     merkle_root: DigestString(hex::encode(&merkle_root_reversed)),
@@ -315,18 +315,6 @@ fn chain_state_to_view(chain_state: ChainState) -> ChainStateView {
         epoch_start_time: chain_state.epoch_start_time,
         pow_target_history,
     }
-}
-
-/// Extract Equihash solution as u32 words (little-endian as per Zcash spec)
-fn extract_solution_words(solution_bytes: &[u8]) -> Vec<u32> {
-    solution_bytes
-        .chunks(4)
-        .map(|chunk| {
-            let mut bytes = [0u8; 4];
-            bytes[..chunk.len()].copy_from_slice(chunk);
-            u32::from_le_bytes(bytes)
-        })
-        .collect()
 }
 
 /// Extract 21-bit Equihash indices from minimal-encoded solution bytes.
