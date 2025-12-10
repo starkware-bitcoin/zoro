@@ -17,6 +17,8 @@ stwo_cairo_air = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "
 [features]
 default = ["syscalls"]
 syscalls = ["consensus/syscalls", "utils/syscalls"]
+blake2b = ["consensus/blake2b"]
+blake2b_mock = ["consensus/blake2b_mock"]
 
 [dev-dependencies]
 cairo_test.workspace = true
