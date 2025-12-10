@@ -161,10 +161,10 @@ impl CairoSerialize for DigestString {
 struct ArgsView {
     chain_state: ChainStateView,
     blocks: Vec<BlockView>,
-    chain_state_proof: Option<CairoProof<Blake2sMerkleHasher>>,
     /// Sorted indices hints for each block (for O(n) Equihash uniqueness verification).
     /// Each hint contains the same 512 indices as the block's solution, but sorted ascending.
     sorted_indices_hints: Vec<Vec<u32>>,
+    chain_state_proof: Option<CairoProof<Blake2sMerkleHasher>>,
 }
 
 /// View matching Cairo `ChainState` layout from consensus/src/types/chain_state.cairo
@@ -275,8 +275,8 @@ pub fn to_runner_args_hex(
     let args_view = ArgsView {
         chain_state: chain_state_view,
         blocks,
-        chain_state_proof,
         sorted_indices_hints,
+        chain_state_proof,
     };
 
     let mut felts = Vec::new();

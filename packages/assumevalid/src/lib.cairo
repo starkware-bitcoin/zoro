@@ -51,8 +51,8 @@ struct BootloaderOutput {
 fn main(
     chain_state: ChainState,
     blocks: Array<Block>,
-    chain_state_proof: Option<CairoProof>,
     sorted_indices_hints: Span<Span<u32>>,
+    chain_state_proof: Option<CairoProof>,
 ) -> Result {
     // let Args { chain_state, blocks, chain_state_proof, sorted_indices_hints } = args;
 

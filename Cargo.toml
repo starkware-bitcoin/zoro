@@ -37,12 +37,12 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # Stwo-cairo
 stwo = { git = "https://github.com/starkware-libs/stwo", rev = "45d0180", default-features = false }
-cairo-air = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "6b45dd698a31d76c43f1e400cdb7ed8c23f97157", default-features = false }
-stwo-cairo-serialize = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "6b45dd698a31d76c43f1e400cdb7ed8c23f97157" }
-stwo_cairo_prover = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "6b45dd698a31d76c43f1e400cdb7ed8c23f97157" }
-stwo-cairo-adapter = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "6b45dd698a31d76c43f1e400cdb7ed8c23f97157" }
-cairo-program-runner-lib = { git = "https://github.com/starkware-libs/proving-utils", rev = "30a03d3e6e2ebe18c07f496f68d340ccb5266dec", default-features = false }
-cairo-vm = { version = "3.0.0", features = ["std"] }
+cairo-air = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-air", default-features = false }
+stwo-cairo-serialize = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-serialize" }
+stwo_cairo_prover = { path = "../stwo-cairo/stwo_cairo_prover/crates/prover" }
+stwo-cairo-adapter = { path = "../stwo-cairo/stwo_cairo_prover/crates/adapter" }
+cairo-program-runner-lib = { path = "../proving-utils/crates/cairo-program-runner-lib", default-features = false }
+cairo-vm = { path = "../cairo-vm/vm", features = ["std"] }
 # Starknet
 starknet-ff = "0.3.7"
 # CLI

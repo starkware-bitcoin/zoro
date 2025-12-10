@@ -4,7 +4,7 @@
 //! using the stwo-cairo prover library directly.
 
 use anyhow::{anyhow, Result};
-use cairo_air::utils::{deserialize_proof_from_file, serialize_proof_to_file, ProofFormat};
+use cairo_air::utils::ProofFormat;
 use cairo_program_runner_lib::cairo_run_program;
 use cairo_program_runner_lib::utils::get_cairo_run_config;
 use cairo_vm::types::layout_name::LayoutName;
@@ -15,7 +15,7 @@ use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+
 use stwo_cairo_adapter::adapter::adapt;
 use stwo_cairo_prover::prover::create_and_serialize_proof;
 use tracing::{debug, error, info, warn};
@@ -83,7 +83,7 @@ pub fn run_and_prove_with_library(
 
     // Load bootloader program from embedded resource
     let bootloader_program = Program::from_bytes(BOOTLOADER_STR.as_bytes(), Some("main"))
-        .map_err(|e| anyhow!("Failed to load bootloader program: {}", e))?;
+        .map_err(|e| anyhow!("Failed to load bootloader program: {e}"))?;
 
     // Configure Cairo VM for proof mode
     let cairo_run_config = get_cairo_run_config(
@@ -103,7 +103,7 @@ pub fn run_and_prove_with_library(
         Some(program_input_str),
         cairo_run_config,
     )
-    .map_err(|e| anyhow!("Cairo VM execution failed: {}", e))?;
+    .map_err(|e| anyhow!("Cairo VM execution failed: {e}"))?;
     let vm_elapsed = vm_start.elapsed();
     let vm_mem = get_memory_mb();
     info!(
@@ -115,7 +115,7 @@ pub fn run_and_prove_with_library(
     // Adapt the VM output for the prover
     debug!("Adapting VM output for prover...");
     let adapt_start = Instant::now();
-    let prover_input = adapt(&runner).map_err(|e| anyhow!("Failed to adapt VM output: {}", e))?;
+    let prover_input = adapt(&runner).map_err(|e| anyhow!("Failed to adapt VM output: {e}"))?;
     let adapt_elapsed = adapt_start.elapsed();
     let adapt_mem = get_memory_mb();
     info!(
@@ -135,7 +135,7 @@ pub fn run_and_prove_with_library(
         ProofFormat::CairoSerde,
         prover_params.map(|p| p.to_path_buf()),
     )
-    .map_err(|e| anyhow!("Proof generation failed: {}", e))?;
+    .map_err(|e| anyhow!("Proof generation failed: {e}"))?;
     let prove_elapsed = prove_start.elapsed();
     let prove_mem = get_memory_mb();
     info!(
@@ -188,7 +188,7 @@ pub fn find_proof_file(start_height: u32, output_dir: &Path) -> Option<PathBuf> 
         for entry in entries.flatten() {
             if entry.path().is_dir() {
                 if let Some(dir_name) = entry.file_name().to_str() {
-                    if dir_name.ends_with(&format!("_to_{}", start_height)) {
+                    if dir_name.ends_with(&format!("_to_{start_height}")) {
                         let proof_file = entry.path().join("proof.json");
                         if proof_file.exists() {
                             return Some(proof_file);
@@ -265,7 +265,7 @@ pub async fn prove(params: ProveParams) -> Result<()> {
             break;
         }
 
-        let job_info = format!("Job(height='{}', blocks={})", current_height, current_step);
+        let job_info = format!("Job(height='{current_height}', blocks={current_step})");
         info!("{} proving...", job_info);
 
         let batch_dir = create_batch_dir(current_height, current_step, &params.output_dir).await?;
@@ -308,7 +308,7 @@ pub async fn prove(params: ProveParams) -> Result<()> {
         );
 
         match batch_result {
-            Ok(proof_path) => {
+            Ok(_proof_path) => {
                 info!("{} done", job_info);
 
                 current_height += current_step;
