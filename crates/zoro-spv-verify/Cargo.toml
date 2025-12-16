@@ -3,6 +3,10 @@ name = "zoro-spv-verify"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "spv-cli"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 
@@ -12,13 +16,29 @@ zoro-zcash-client = { path = "../zoro-zcash-client" }
 
 # Logging
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Serialization
 hex = "0.4.3"
 serde = { workspace = true }
+serde_json = { workspace = true }
 num-bigint = "0.4.3"
-starknet-ff = "0.3.7" 
+starknet-ff = "0.3.7"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
 
 # Stwo-cairo
 cairo-air = { workspace = true }
 stwo = { workspace = true }
+
+# FlyClient MMR verification
+accumulators = { git = "https://github.com/0xLucqs/rust-accumulators", rev = "6e2a2cf", features = [
+    "flyclient",
+    "mmr",
+    "memory",
+] }
