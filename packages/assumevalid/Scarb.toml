@@ -10,7 +10,7 @@ allow-syscalls = true
 cairo_execute = "2.11.4"
 consensus = { path = "../consensus" }
 utils = { path = "../utils" }
-stwo_cairo_air = { path = "/Users/lucas/zoro-proving-stack/stwo-cairo/stwo_cairo_verifier/crates/cairo_air", features = [
+stwo_cairo_air = { path = "../../../stwo-cairo/stwo_cairo_verifier/crates/cairo_air", features = [
     "qm31_opcode",
 ] }
 
