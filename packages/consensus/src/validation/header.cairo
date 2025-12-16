@@ -84,7 +84,7 @@ pub fn validate_header(
 
     check_equihash_solution(block.header, state.best_block_hash, txid_root, sorted_indices_hint)?;
     validate_proof_of_work(current_target, best_block_hash)?;
-    validate_bits(current_target, block.header.bits)?;
+    validate_bits(current_target, block.header.bits, block_height)?;
 
     let mut epoch_start_time = state.epoch_start_time;
     if block_height % LEGACY_EPOCH_INTERVAL == 0 {

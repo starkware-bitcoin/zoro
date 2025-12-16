@@ -7,6 +7,35 @@ use accumulators::{
         ProofOptions, MMR,
     },
 };
+
+/// Heartwood activation height - FlyClient MMR starts here
+const HEARTWOOD_ACTIVATION: u32 = 903_000;
+/// Canopy activation height (mainnet) - new epoch
+const CANOPY_ACTIVATION: u32 = 1_046_400;
+/// NU5 activation height (mainnet) - new epoch
+const NU5_ACTIVATION: u32 = 1_687_104;
+
+/// Get the epoch name for a height
+fn epoch_name_for_height(height: u32) -> &'static str {
+    if height >= NU5_ACTIVATION {
+        "nu5"
+    } else if height >= CANOPY_ACTIVATION {
+        "canopy"
+    } else {
+        "heartwood"
+    }
+}
+
+/// Get the epoch start height
+fn epoch_start_height(height: u32) -> u32 {
+    if height >= NU5_ACTIVATION {
+        NU5_ACTIVATION
+    } else if height >= CANOPY_ACTIVATION {
+        CANOPY_ACTIVATION
+    } else {
+        HEARTWOOD_ACTIVATION
+    }
+}
 use hex::FromHex;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -36,11 +65,13 @@ pub struct ChainHeightQuery {
 /// Proof data structure for demonstrating inclusion of a block in the MMR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockInclusionProof {
+    /// Block height
+    pub block_height: u32,
     /// MMR peak hashes at the time of proof generation
     pub peaks_hashes: Vec<String>,
     /// Sibling hashes needed to reconstruct the path to the root
     pub siblings_hashes: Vec<String>,
-    /// Leaf index of the block in the MMR (same as block height)
+    /// Leaf index of the block in the MMR
     pub leaf_index: usize,
     /// Total number of leaves in the MMR
     pub leaf_count: usize,
@@ -74,11 +105,19 @@ pub struct RpcServer {
     rx_shutdown: broadcast::Receiver<()>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
     store: Arc<AppStore>,
     zcash_client: Arc<ZcashClient>,
-    flyclient_mmr: Arc<MMR>,
+    db_path: PathBuf,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("db_path", &self.db_path)
+            .finish()
+    }
 }
 
 impl AppState {
@@ -88,19 +127,25 @@ impl AppState {
             &config.db_path,
             id.clone(),
         ));
-        let hasher = ZcashFlyclientHasher;
-        let mmr = MMR::new(
-            store.clone(),
-            Arc::new(hasher),
-            Some(format!("flyclient_{}", config.id)),
-        );
         let zcash_client =
             ZcashClient::new(config.rpc_url.clone(), config.rpc_userpwd.clone()).await?;
         Ok(Self {
             zcash_client: Arc::new(zcash_client),
             store: store.clone(),
-            flyclient_mmr: Arc::new(mmr),
+            db_path: config.db_path.clone(),
         })
+    }
+
+    /// Get the FlyClient MMR for a specific block height (epoch-aware)
+    fn get_flyclient_mmr(&self, block_height: u32) -> MMR {
+        let epoch = epoch_name_for_height(block_height);
+        let mmr_id = format!("flyclient_{}", epoch);
+        let hasher = ZcashFlyclientHasher;
+        MMR::new(
+            self.store.clone(),
+            Arc::new(hasher),
+            Some(mmr_id),
+        )
     }
 }
 
@@ -120,7 +165,10 @@ impl RpcServer {
             .map_err(std::io::Error::other)?;
 
         let app = Router::new()
-            .route("/block-inclusion-proof/:block_height", get(generate_proof))
+            .route(
+                "/block-inclusion-proof/:block_hash",
+                get(generate_block_inclusion_proof),
+            )
             .route("/head", get(get_head))
             .route("/headers", get(get_block_headers))
             .route("/transaction-proof/:tx_id", get(get_transaction_proof))
@@ -153,50 +201,68 @@ impl RpcServer {
     }
 }
 
-/// Generate an inclusion proof for a block at the specified height
-///
-/// # Arguments
-/// * `block_height` - The block height to generate a proof for
-/// * `chain_height` - The chain (MMR) height to generate a proof for (optional)
-///
-/// # Returns
-/// * `Json<InclusionProof>` - The inclusion proof in JSON format
-/// * `StatusCode::INTERNAL_SERVER_ERROR` - If proof generation fails
-pub async fn generate_proof(
+/// Generate a block inclusion proof for a specific block hash
+pub async fn generate_block_inclusion_proof(
     State(state): State<AppState>,
-    Path(block_height): Path<u32>,
+    Path(block_hash): Path<String>,
     Query(query): Query<ChainHeightQuery>,
 ) -> Result<Json<BlockInclusionProof>, StatusCode> {
-    let element_index = map_leaf_index_to_element_index(block_height as usize);
+    // Get block height from hash via Zcash RPC
+    let block_height = state
+        .zcash_client
+        .get_block_height_by_hash_str(&block_hash)
+        .await
+        .map_err(|e| {
+            error!("Failed to get block height for hash {}: {}", block_hash, e);
+            StatusCode::NOT_FOUND
+        })?;
+
+    // FlyClient MMR starts at Heartwood
+    if block_height < HEARTWOOD_ACTIVATION {
+        error!(
+            "Block {} is before Heartwood activation ({})",
+            block_hash, HEARTWOOD_ACTIVATION
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Get epoch-specific MMR and calculate leaf index within that epoch
+    let epoch_start = epoch_start_height(block_height);
+    let leaf_index = (block_height - epoch_start) as usize;
+    let element_index = map_leaf_index_to_element_index(leaf_index);
+    
+    // Get the epoch-specific MMR
+    let flyclient_mmr = state.get_flyclient_mmr(block_height);
+
     let options = ProofOptions {
         elements_count: query
             .chain_height
-            .map(|c| leaf_count_to_mmr_size(c as usize + 1)),
+            .map(|c| leaf_count_to_mmr_size((c - epoch_start) as usize + 1)),
         ..Default::default()
     };
     let proof = {
-        let pr = state
-            .flyclient_mmr
+        let pr = flyclient_mmr
             .get_proof(element_index, Some(options))
             .await
             .map_err(|e| {
                 error!(
-                    "Failed to generate block proof for height {}: {}",
-                    block_height, e
+                    "Failed to generate block proof for hash {}: {}",
+                    block_hash, e
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
         let leaf_count = elements_count_to_leaf_count(pr.elements_count).map_err(|e| {
             error!(
-                "Failed to generate block proof for height {}: {}",
-                block_height, e
+                "Failed to generate block proof for hash {}: {}",
+                block_hash, e
             );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         BlockInclusionProof {
+            block_height,
             peaks_hashes: pr.peaks_hashes,
             siblings_hashes: pr.siblings_hashes,
-            leaf_index: block_height as usize,
+            leaf_index,
             leaf_count,
         }
     };

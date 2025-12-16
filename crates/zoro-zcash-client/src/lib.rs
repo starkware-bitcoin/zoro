@@ -141,6 +141,15 @@ impl ZcashClient {
         Ok(block_height)
     }
 
+    /// Get block height by hash string
+    pub async fn get_block_height_by_hash_str(&self, hash: &str) -> Result<u32, ZcashClientError> {
+        let header_info: serde_json::Value = self
+            .request("getblockheader", rpc_params![hash, true])
+            .await?;
+        let block_height = decode_block_height(&header_info)?;
+        Ok(block_height)
+    }
+
     /// Get block header by height
     pub async fn get_block_header_by_height(
         &self,
