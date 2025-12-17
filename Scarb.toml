@@ -11,7 +11,9 @@ license-file = "LICENSE"
 
 [workspace.dependencies]
 cairo_test = "2.12.2"
-shinigami_engine = { git = "https://github.com/keep-starknet-strange/shinigami.git", rev = "1963116" }
+
+[cairo]
+enable-gas = false
 
 [profile.proving]
 inherits = "release"

@@ -10,11 +10,15 @@ allow-syscalls = true
 cairo_execute = "2.11.4"
 consensus = { path = "../consensus" }
 utils = { path = "../utils" }
-stwo_cairo_air = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "e8bc9571675bb654b6e26a7bd53838a6ae78c344", features = ["qm31_opcode"] }
+stwo_cairo_air = { git = "https://github.com/Ztarknet/stwo-cairo", branch = "blake2b", features = [
+    "qm31_opcode",
+] }
 
 [features]
 default = ["syscalls"]
 syscalls = ["consensus/syscalls", "utils/syscalls"]
+blake2b = ["consensus/blake2b"]
+blake2b_mock = ["consensus/blake2b_mock"]
 
 [dev-dependencies]
 cairo_test.workspace = true

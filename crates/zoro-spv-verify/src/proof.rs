@@ -4,8 +4,8 @@
 use cairo_air::CairoProof;
 use serde::{Deserialize, Serialize};
 use starknet_ff::FieldElement;
-use stwo_prover::core::vcs::blake2_hash::Blake2sHasher;
-use stwo_prover::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+use stwo::core::vcs::blake2_hash::Blake2sHasher;
+use stwo::core::vcs::blake2_merkle::Blake2sMerkleHasher;
 use zebra_chain::block::Hash;
 use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
@@ -35,8 +35,88 @@ pub struct TransactionInclusionProof {
     pub block_height: u32,
 }
 
-/// A compact, self-contained proof that a Zcash transaction is included
-/// in a specific block and that the block is part of a valid chain state.
+/// FlyClient MMR inclusion proof for a block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockInclusionProof {
+    /// Block height
+    pub block_height: u32,
+    /// MMR peak hashes at the time of proof generation
+    pub peaks_hashes: Vec<String>,
+    /// Sibling hashes needed to reconstruct the path to the root
+    pub siblings_hashes: Vec<String>,
+    /// Leaf index of the block in the MMR (within its epoch)
+    pub leaf_index: usize,
+    /// Total number of leaves in the MMR
+    pub leaf_count: usize,
+}
+
+/// Chain state proof wrapper containing the STARK proof and the chain state it proves
+#[derive(Serialize, Deserialize)]
+pub struct ChainStateProof {
+    /// The chain state being proven
+    pub chain_state: ChainState,
+    /// The Cairo STARK proof that this chain state is valid
+    pub proof: CairoProof<Blake2sMerkleHasher>,
+}
+
+/// A complete, self-contained proof that a Zcash transaction is included
+/// in a verified chain. Combines three layers of proofs:
+/// 1. Chain State Proof: STARK proof that the chain state at height H is valid
+/// 2. Block Inclusion Proof: FlyClient MMR proof that block B is in the chain
+/// 3. Transaction Inclusion Proof: Merkle proof that tx T is in block B
+#[derive(Serialize, Deserialize)]
+pub struct FullInclusionProof {
+    // === Layer 1: Chain State ===
+    /// The verified chain state (at the tip of the proven chain)
+    pub chain_state: ChainState,
+    /// Cairo STARK proof that chain_state is valid
+    pub chain_state_proof: CairoProof<Blake2sMerkleHasher>,
+
+    // === Layer 2: Block Inclusion ===
+    /// The block header containing the transaction
+    #[serde(
+        serialize_with = "serialize_header",
+        deserialize_with = "deserialize_header"
+    )]
+    pub block_header: Header,
+    /// Height of the block containing the transaction
+    pub block_height: u32,
+    /// FlyClient MMR proof that this block is included in the chain
+    pub block_inclusion_proof: BlockInclusionProof,
+
+    // === Layer 3: Transaction Inclusion ===
+    /// The transaction being proven
+    #[serde(
+        serialize_with = "serialize_transaction",
+        deserialize_with = "deserialize_transaction"
+    )]
+    pub transaction: Transaction,
+    /// Merkle proof that transaction is in block_header's merkle root
+    pub transaction_proof: MerkleProof,
+}
+
+impl FullInclusionProof {
+    /// Calculate the number of confirmations for this transaction
+    /// Confirmations = chain_state.block_height - block_height + 1
+    pub fn confirmations(&self) -> u32 {
+        self.chain_state
+            .block_height
+            .saturating_sub(self.block_height)
+            + 1
+    }
+
+    /// Get the transaction hash
+    pub fn transaction_hash(&self) -> zebra_chain::transaction::Hash {
+        self.transaction.hash()
+    }
+
+    /// Get the block hash
+    pub fn block_hash(&self) -> Hash {
+        self.block_header.hash()
+    }
+}
+
+/// Legacy CompressedSpvProof kept for backwards compatibility
 #[derive(Serialize, Deserialize)]
 pub struct CompressedSpvProof {
     /// The current state of the chain
@@ -50,7 +130,7 @@ pub struct CompressedSpvProof {
     )]
     pub block_header: Header,
     /// MMR inclusion proof for the block header
-    pub block_header_proof: Vec<u8>, // ToDo: adapt for fly client
+    pub block_header_proof: Vec<u8>,
     /// The transaction to be proven
     #[serde(
         serialize_with = "serialize_transaction",
@@ -75,6 +155,10 @@ impl Target {
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -111,18 +195,16 @@ pub struct BootloaderOutput {
     pub task_result: TaskResult,
 }
 
-/// Output of the payload program
+/// Output of the payload program (matches Cairo's Result struct)
 #[derive(Debug, Clone)]
 pub struct TaskResult {
-    /// Hash of the chain state after the blocks have been applied.
+    /// Hash of the chain state after the blocks have been applied (u256 = 2 felts).
     pub chain_state_hash: String,
-    /// Hash of the roots of the Merkle Mountain Range of the block hashes.
-    pub block_mmr_hash: String,
-    /// Hash of the previous bootloader program that was recursively verified.
+    /// Hash of the previous bootloader program that was recursively verified (felt252).
     /// We do not hardcode the bootloader hash in the assumevalid program,
     /// letting the final verifier to check that it is as expected.
     pub bootloader_hash: String,
-    /// Hash of the assumevalid program that was recursively verified.
+    /// Hash of the assumevalid program that was recursively verified (felt252).
     /// We cannot know the hash of the program from within the program, so we have to carry it over.
     /// This also allows composing multiple programs (e.g. if we'd need to upgrade at a certain
     /// block height).
@@ -153,16 +235,15 @@ impl BootloaderOutput {
 
 impl TaskResult {
     /// Decode `TaskResult` from the remainder of the Cairo public output felts.
+    /// Matches Cairo's Result struct: chain_state_hash (u256), bootloader_hash (felt252), program_hash (felt252)
     pub fn decode(mut output: Vec<FieldElement>) -> anyhow::Result<Self> {
         let chain_state_hash = decode_hash(&mut output)?;
-        let block_mmr_hash = decode_hash(&mut output)?;
-        let prev_bootloader_hash = decode_truncated_hash(&mut output)?;
-        let prev_program_hash = decode_truncated_hash(&mut output)?;
+        let bootloader_hash = decode_truncated_hash(&mut output)?;
+        let program_hash = decode_truncated_hash(&mut output)?;
         Ok(Self {
             chain_state_hash,
-            block_mmr_hash,
-            bootloader_hash: prev_bootloader_hash,
-            program_hash: prev_program_hash,
+            bootloader_hash,
+            program_hash,
         })
     }
 }

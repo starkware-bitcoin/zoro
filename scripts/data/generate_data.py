@@ -434,7 +434,7 @@ def format_header(header: dict):
         "time": header["time"],
         "bits": parse_bits(header["bits"]),
         "nonce": normalize_hash_string(header.get("nonce", "0" * 64)),
-        "solution": format_solution(header.get("solution", "")),
+        "indices": format_solution(header.get("solution", "")),
     }
 
 
@@ -446,18 +446,55 @@ def normalize_hash_string(value: str) -> str:
 
 
 def format_solution(solution_hex: str) -> list[int]:
+    """Convert hex-encoded solution bytes to unpacked 21-bit indices.
+
+    For Zcash mainnet (n=200, k=9), this extracts 512 indices of 21 bits each
+    from the 1344-byte minimal-encoded solution.
+    """
     solution_hex = solution_hex.lower()
     if solution_hex.startswith("0x"):
         solution_hex = solution_hex[2:]
     if not solution_hex:
         return []
+
     data = bytes.fromhex(solution_hex)
-    if len(data) % 4 != 0:
-        raise ValueError(f"Equihash solution must be multiple of 4 bytes, got {len(data)}")
-    words: list[int] = []
-    for i in range(0, len(data), 4):
-        words.append(int.from_bytes(data[i : i + 4], "little"))
-    return words
+
+    # Equihash parameters for Zcash mainnet
+    n = 200
+    k = 9
+    collision_bit_length = n // (k + 1)  # 20
+    bits_per_index = collision_bit_length + 1  # 21
+    num_indices = 2 ** k  # 512
+    expected_bytes = (num_indices * bits_per_index + 7) // 8  # 1344
+
+    if len(data) != expected_bytes:
+        raise ValueError(f"Equihash solution must be {expected_bytes} bytes, got {len(data)}")
+
+    # Unpack 21-bit indices from minimal-encoded bytes (big-endian bitstream)
+    indices: list[int] = []
+    for idx in range(num_indices):
+        value = 0
+        for b in range(bits_per_index):
+            global_bit = idx * bits_per_index + b
+            byte_index = global_bit // 8
+            bit_in_byte = global_bit % 8
+            # Big-endian: bit 0 is MSB of byte
+            bit_val = (data[byte_index] >> (7 - bit_in_byte)) & 1
+            value = (value << 1) | bit_val
+        indices.append(value)
+
+    return indices
+
+
+def get_sorted_indices_hint(indices: list[int]) -> list[int]:
+    """Generate sorted indices hint for O(n) uniqueness verification.
+
+    The prover provides a sorted version of the indices as a hint.
+    The verifier then checks:
+    1. The hint is strictly increasing (guarantees uniqueness)
+    2. The hint is a permutation of the original (via product check)
+    """
+    return sorted(indices)
 
 
 def next_chain_state(current_state: dict, new_block: dict) -> dict:
@@ -537,10 +574,18 @@ def generate_data(
         logger.info(f"Fetched block {initial_height + i + 1} {i + 1}/{num_blocks}")
 
     formatted_blocks = list(map(format_block, blocks))
+
+    # Generate sorted indices hints for each block (for O(n) uniqueness verification)
+    sorted_indices_hints = []
+    for block in formatted_blocks:
+        indices = block["header"]["indices"]
+        sorted_indices_hints.append(get_sorted_indices_hint(indices))
+
     result = {
         "chain_state": format_chain_state(initial_chain_state),
         "blocks": formatted_blocks,
         "expected": format_chain_state(chain_state),
+        "sorted_indices_hints": sorted_indices_hints,
     }
 
     if formatted_blocks:

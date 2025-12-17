@@ -2,14 +2,19 @@
 // Equihash helpers on top of our Blake2b
 // =======================
 
-use consensus::params::{EQUIHASH_K, EQUIHASH_N, EQUIHASH_SOLUTION_SIZE_BYTES};
+#[cfg(feature: "blake2b")]
+use consensus::params::{EQUIHASH_HASH_OUTPUT_LENGTH, EQUIHASH_PERSONALIZATION};
+use consensus::params::{EQUIHASH_INDICES_MAX, EQUIHASH_INDICES_TOTAL, EQUIHASH_K, EQUIHASH_N};
 use consensus::types::block::Header;
 use core::array::ArrayTrait;
+#[cfg(feature: "blake2b")]
+use core::blake::{Blake2bHasher, Blake2bHasherTrait, Blake2bParamsTrait};
+#[cfg(feature: "blake2b")]
+use core::traits::DivRem;
 use core::traits::{Into, TryInto};
 use utils::bit_shifts::{pow32, shl64, shr64};
 use utils::blake2b::blake2b_hash;
 use utils::hash::Digest;
-
 
 // 512-bit Blake2b output split into n-bit chunks
 fn equihash_indices_per_hash_output(n: u32) -> u32 {
@@ -141,17 +146,6 @@ fn indices_before(a: @EquihashNode, b: @EquihashNode) -> bool {
     a0 < b0
 }
 
-fn distinct_indices(a: @EquihashNode, b: @EquihashNode) -> bool {
-    for ai in a.indices.span() {
-        for bi in b.indices.span() {
-            if ai == bi {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 fn from_children(mut a: EquihashNode, mut b: EquihashNode, trim: usize) -> EquihashNode {
     // XOR hashes after skipping first `trim` bytes
     let ha = a.hash.span();
@@ -220,6 +214,278 @@ fn empty_node() -> EquihashNode {
     EquihashNode { hash: array![], indices: array![] }
 }
 
+// =====================
+// U32-optimized node helpers (stores 20-bit elements as u32 instead of 3-byte sequences)
+// This eliminates expand_array entirely for the blake2b cached path.
+// =====================
+
+/// Node optimized to store hash elements as u32 array (10 elements for Zcash n=200, k=9).
+/// Each element is a 20-bit value stored in a u32.
+/// This is more efficient than Array<u8> because:
+/// 1. No expand_array byte-by-byte construction
+/// 2. Collision checking compares u32s instead of 3 bytes
+/// 3. XOR operations work on u32s instead of individual bytes
+#[derive(Drop)]
+struct OptimizedNodeU32 {
+    hash: Array<u32>, // 10 elements, each storing a 20-bit value
+    min_index: u32,
+}
+
+fn empty_optimized_node_u32() -> OptimizedNodeU32 {
+    OptimizedNodeU32 { hash: array![], min_index: 0 }
+}
+
+/// Extract all 8 bytes from a u64 using sequential DivRem (more efficient than repeated shr64)
+/// Returns (b0, b1, b2, b3, b4, b5, b6, b7) where b0 is least significant byte
+#[cfg(feature: "blake2b")]
+#[inline(always)]
+fn extract_bytes_from_u64(w: u64) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
+    let (rest, b0) = DivRem::div_rem(w, 256);
+    let (rest, b1) = DivRem::div_rem(rest, 256);
+    let (rest, b2) = DivRem::div_rem(rest, 256);
+    let (rest, b3) = DivRem::div_rem(rest, 256);
+    let (rest, b4) = DivRem::div_rem(rest, 256);
+    let (rest, b5) = DivRem::div_rem(rest, 256);
+    let (b7, b6) = DivRem::div_rem(rest, 256);
+    (
+        b0.try_into().unwrap(),
+        b1.try_into().unwrap(),
+        b2.try_into().unwrap(),
+        b3.try_into().unwrap(),
+        b4.try_into().unwrap(),
+        b5.try_into().unwrap(),
+        b6.try_into().unwrap(),
+        b7.try_into().unwrap(),
+    )
+}
+
+/// Extract 10 u32 elements (20-bit each) directly from blake2b u64 state.
+/// For Zcash (n=200, k=9): produces 10 elements from 25 bytes (200 bits).
+#[cfg(feature: "blake2b")]
+fn extract_elements_from_state_u32(state: Box<[u64; 8]>, subindex: u32) -> Array<u32> {
+    let [w0, w1, w2, w3, w4, w5, w6, _w7] = state.unbox();
+
+    if subindex == 0 {
+        extract_elements_subindex0(w0, w1, w2, w3)
+    } else {
+        extract_elements_subindex1(w3, w4, w5, w6)
+    }
+}
+
+/// Extract 10 elements from bytes 0-24 (subindex 0)
+/// Bytes 0-7 in w0, 8-15 in w1, 16-23 in w2, 24 in w3[0]
+#[cfg(feature: "blake2b")]
+#[inline(always)]
+fn extract_elements_subindex0(w0: u64, w1: u64, w2: u64, w3: u64) -> Array<u32> {
+    // Extract all bytes from each word using sequential DivRem
+    let (b0, b1, b2, b3, b4, b5, b6, b7) = extract_bytes_from_u64(w0);
+    let (b8, b9, b10, b11, b12, b13, b14, b15) = extract_bytes_from_u64(w1);
+    let (b16, b17, b18, b19, b20, b21, b22, b23) = extract_bytes_from_u64(w2);
+    // Only need first byte from w3 for subindex 0
+    let b24: u32 = (w3 & 0xFF).try_into().unwrap();
+
+    // Chunk 0: bytes 0-4 -> elem0, elem1
+    let elem0 = (b0 * 4096) + (b1 * 16) + (b2 / 16);
+    let elem1 = ((b2 & 0x0f) * 65536) + (b3 * 256) + b4;
+
+    // Chunk 1: bytes 5-9 -> elem2, elem3
+    let elem2 = (b5 * 4096) + (b6 * 16) + (b7 / 16);
+    let elem3 = ((b7 & 0x0f) * 65536) + (b8 * 256) + b9;
+
+    // Chunk 2: bytes 10-14 -> elem4, elem5
+    let elem4 = (b10 * 4096) + (b11 * 16) + (b12 / 16);
+    let elem5 = ((b12 & 0x0f) * 65536) + (b13 * 256) + b14;
+
+    // Chunk 3: bytes 15-19 -> elem6, elem7
+    let elem6 = (b15 * 4096) + (b16 * 16) + (b17 / 16);
+    let elem7 = ((b17 & 0x0f) * 65536) + (b18 * 256) + b19;
+
+    // Chunk 4: bytes 20-24 -> elem8, elem9
+    let elem8 = (b20 * 4096) + (b21 * 16) + (b22 / 16);
+    let elem9 = ((b22 & 0x0f) * 65536) + (b23 * 256) + b24;
+
+    array![elem0, elem1, elem2, elem3, elem4, elem5, elem6, elem7, elem8, elem9]
+}
+
+/// Extract 10 elements from bytes 25-49 (subindex 1)
+/// Bytes 25-31 in w3[1-7], 32-39 in w4, 40-47 in w5, 48-49 in w6[0-1]
+#[cfg(feature: "blake2b")]
+#[inline(always)]
+fn extract_elements_subindex1(w3: u64, w4: u64, w5: u64, w6: u64) -> Array<u32> {
+    // Extract all bytes from each word using sequential DivRem
+    // For w3, we skip byte 0 (already used in subindex0) and use bytes 1-7
+    let (_w3_b0, b0, b1, b2, b3, b4, b5, b6) = extract_bytes_from_u64(w3);
+    let (b7, b8, b9, b10, b11, b12, b13, b14) = extract_bytes_from_u64(w4);
+    let (b15, b16, b17, b18, b19, b20, b21, b22) = extract_bytes_from_u64(w5);
+    // Only need first 2 bytes from w6
+    let (rest, b23_u64) = DivRem::div_rem(w6, 256);
+    let (_, b24_u64) = DivRem::div_rem(rest, 256);
+    let b23: u32 = b23_u64.try_into().unwrap();
+    let b24: u32 = b24_u64.try_into().unwrap();
+
+    // Chunk 0: bytes 25-29 (w3[1-5]) -> elem0, elem1
+    let elem0 = (b0 * 4096) + (b1 * 16) + (b2 / 16);
+    let elem1 = ((b2 & 0x0f) * 65536) + (b3 * 256) + b4;
+
+    // Chunk 1: bytes 30-34 (w3[6,7], w4[0,1,2]) -> elem2, elem3
+    let elem2 = (b5 * 4096) + (b6 * 16) + (b7 / 16);
+    let elem3 = ((b7 & 0x0f) * 65536) + (b8 * 256) + b9;
+
+    // Chunk 2: bytes 35-39 (w4[3,4,5,6,7]) -> elem4, elem5
+    let elem4 = (b10 * 4096) + (b11 * 16) + (b12 / 16);
+    let elem5 = ((b12 & 0x0f) * 65536) + (b13 * 256) + b14;
+
+    // Chunk 3: bytes 40-44 (w5[0,1,2,3,4]) -> elem6, elem7
+    let elem6 = (b15 * 4096) + (b16 * 16) + (b17 / 16);
+    let elem7 = ((b17 & 0x0f) * 65536) + (b18 * 256) + b19;
+
+    // Chunk 4: bytes 45-49 (w5[5,6,7], w6[0,1]) -> elem8, elem9
+    let elem8 = (b20 * 4096) + (b21 * 16) + (b22 / 16);
+    let elem9 = ((b22 & 0x0f) * 65536) + (b23 * 256) + b24;
+
+    array![elem0, elem1, elem2, elem3, elem4, elem5, elem6, elem7, elem8, elem9]
+}
+
+/// Creates a leaf node using the cached base hasher, storing hash as u32 array.
+/// This bypasses expand_array entirely by extracting u32 elements directly.
+#[cfg(feature: "blake2b")]
+fn make_leaf_cached_u32(base_hasher: @Blake2bHasher, n: u32, idx: u32) -> OptimizedNodeU32 {
+    let indices_per: u32 = equihash_indices_per_hash_output(n);
+
+    // Which Blake2b invocation and which chunk?
+    let hash_input_index: u32 = idx / indices_per;
+    let subindex: u32 = idx % indices_per;
+
+    // Clone the base hasher and finalize with the index using optimized update_u32_le
+    let mut hasher: Blake2bHasher = base_hasher.clone_state();
+    hasher.update_u32_le(hash_input_index);
+
+    // Get raw state and extract u32 elements directly
+    let state = hasher.finalize();
+    let elements = extract_elements_from_state_u32(state, subindex);
+
+    OptimizedNodeU32 { hash: elements, min_index: idx }
+}
+
+/// Check collision on first element of two u32 nodes.
+/// For Zcash (n=200, k=9), collision_bytes=3 corresponds to comparing
+/// the first 20-bit element (stored as first u32).
+#[inline]
+fn has_collision_u32(ref a: OptimizedNodeU32, ref b: OptimizedNodeU32) -> bool {
+    *a.hash.at(0) == *b.hash.at(0)
+}
+
+/// Check if a's min_index < b's min_index
+#[inline]
+fn indices_before_u32(a: @OptimizedNodeU32, b: @OptimizedNodeU32) -> bool {
+    *a.min_index < *b.min_index
+}
+
+/// Merge two u32 nodes: XOR hash elements after trimming first element.
+/// For Zcash, trim=collision_bytes=3 corresponds to skipping 1 element.
+fn from_children_u32(mut a: OptimizedNodeU32, mut b: OptimizedNodeU32) -> OptimizedNodeU32 {
+    let mut ha = a.hash.span();
+    let mut hb = b.hash.span();
+
+    // Skip first element (the collision element we just verified)
+    ha.pop_front().unwrap();
+    hb.pop_front().unwrap();
+
+    // XOR remaining elements
+    let mut hash: Array<u32> = array![];
+    while let (Option::Some(ea), Option::Some(eb)) = (ha.pop_front(), hb.pop_front()) {
+        hash.append(*ea ^ *eb);
+    }
+
+    let min_index = if a.min_index < b.min_index {
+        a.min_index
+    } else {
+        b.min_index
+    };
+
+    OptimizedNodeU32 { hash, min_index }
+}
+
+/// Check if u32 node has zero first element.
+/// For the root node, we need to check that the remaining element(s) are zero.
+#[inline]
+fn is_zero_root_u32(node: OptimizedNodeU32) -> bool {
+    let mut h = node.hash.span();
+    match h.pop_front() {
+        Option::Some(elem) => *elem == 0_u32,
+        Option::None => true // Empty hash is considered zero
+    }
+}
+
+/// Tree validator using u32-optimized nodes and first-block caching.
+/// This is the most efficient path: no expand_array, u32 operations for collision/XOR.
+#[cfg(feature: "blake2b")]
+fn tree_validator_cached_u32(
+    n: u32, k: u32, base_hasher: @Blake2bHasher, indices_span: Span<u32>, start: usize, end: usize,
+) -> (bool, OptimizedNodeU32) {
+    let count = end - start;
+
+    if count == 0_usize {
+        return (false, empty_optimized_node_u32());
+    }
+
+    if count == 1_usize {
+        let idx: u32 = *indices_span.at(start);
+        let leaf = make_leaf_cached_u32(base_hasher, n, idx);
+        return (true, leaf);
+    }
+
+    // Fast path for leaf pairs (count == 2)
+    if count == 2_usize {
+        let idx_left: u32 = *indices_span.at(start);
+        let idx_right: u32 = *indices_span.at(start + 1);
+
+        // Quick indices_before check (fail fast)
+        if idx_left > idx_right {
+            return (false, empty_optimized_node_u32());
+        }
+
+        // Build leaves using cached hasher
+        let mut left = make_leaf_cached_u32(base_hasher, n, idx_left);
+        let mut right = make_leaf_cached_u32(base_hasher, n, idx_right);
+
+        // Check collision (first u32 element must match)
+        if !has_collision_u32(ref left, ref right) {
+            return (false, left);
+        }
+
+        let parent = from_children_u32(left, right);
+        return (true, parent);
+    }
+
+    let mid: usize = start + (count / 2_usize);
+
+    let (ok_left, mut left_node) = tree_validator_cached_u32(
+        n, k, base_hasher, indices_span, start, mid,
+    );
+    if !ok_left {
+        return (false, left_node);
+    }
+
+    let (ok_right, mut right_node) = tree_validator_cached_u32(
+        n, k, base_hasher, indices_span, mid, end,
+    );
+    if !ok_right {
+        return (false, right_node);
+    }
+
+    // Validate subtrees
+    if !has_collision_u32(ref left_node, ref right_node) {
+        return (false, left_node);
+    }
+    if !indices_before_u32(@left_node, @right_node) {
+        return (false, left_node);
+    }
+
+    let parent = from_children_u32(left_node, right_node);
+    (true, parent)
+}
+
 fn make_leaf(n: u32, k: u32, header_span: Array<u8>, idx: u32) -> EquihashNode {
     // n/8-byte slice from BLAKE2b
     let hash_bytes: Span<u8> = equihash_hash_index(header_span, n, k, idx);
@@ -279,9 +545,6 @@ fn tree_validator(
     if !indices_before(@left_node, @right_node) {
         return (false, left_node);
     }
-    if !distinct_indices(@left_node, @right_node) {
-        return (false, left_node);
-    }
 
     let parent = from_children(left_node, right_node, collision_bytes);
     (true, parent)
@@ -317,70 +580,6 @@ fn get_bit_be(bytes: Span<u8>, bit_index: usize) -> u8 {
 // Minimal decoder
 // =====================
 
-// Decode minimal-encoded solution bytes into indices,
-// like Rust `indices_from_minimal(p, soln)`.
-// Returns (ok, indices).
-fn indices_from_minimal_bytes(n: u32, k: u32, minimal: Array<u8>) -> (bool, Array<u32>) {
-    // Basic param checks (same as Params::new)
-    if n % 8_u32 != 0_u32 {
-        return (false, array![]);
-    }
-    if k < 3_u32 {
-        return (false, array![]);
-    }
-    if k >= n {
-        return (false, array![]);
-    }
-    let k1 = k + 1_u32;
-    if n % k1 != 0_u32 {
-        return (false, array![]);
-    }
-
-    let c_bits: u32 = collision_bit_length(n, k);
-    let bits_per_index: u32 = c_bits + 1_u32;
-
-    // expected length in bytes = (2^k * (c_bits+1))/8
-    let count_u32: u32 = pow32(k).try_into().unwrap();
-    let numerator_bits: u64 = (count_u32.into()) * (bits_per_index.into());
-    let expected_len_u32: u32 = (numerator_bits / 8_u64).try_into().unwrap();
-    let minimal_len: usize = minimal.len();
-
-    if minimal_len != expected_len_u32 {
-        return (false, array![]);
-    }
-
-    let indices_len: usize = count_u32;
-    let span = minimal.span();
-    let total_bits: usize = minimal_len * 8_usize;
-    let needed_bits: usize = count_u32 * bits_per_index;
-
-    if total_bits < needed_bits {
-        return (false, array![]);
-    }
-
-    let mut indices = array![];
-    let mut idx: usize = 0;
-    while idx < indices_len {
-        let mut value_u32: u32 = 0_u32;
-
-        let mut b: u32 = 0_u32;
-        while b < bits_per_index {
-            let global_bit_u64: u64 = idx.into() * bits_per_index.into() + b.into();
-            let global_bit: usize = global_bit_u64.try_into().unwrap();
-
-            let bit_val: u8 = get_bit_be(span, global_bit);
-            // value = (value << 1) | bit  (no <<)
-            value_u32 = value_u32 * 2_u32 + (bit_val.into());
-
-            b = b + 1_u32;
-        }
-
-        indices.append(value_u32);
-        idx = idx + 1_usize;
-    }
-
-    (true, indices)
-}
 // Expand an array of bytes into elements of size `bit_len` bits, each
 // output as `width = ceil(bit_len/8)` big-endian bytes.
 //
@@ -437,6 +636,236 @@ fn expand_array(bytes: Span<u8>, bit_len: u32) -> Array<u8> {
 // Indices-based validator
 // =====================
 
+/// Ensures that the solution indices are in the correct format:
+pub fn is_valid_solution_format(indices: Span<u32>) -> bool {
+    if indices.len() != EQUIHASH_INDICES_TOTAL {
+        return false;
+    }
+
+    // Check that indices are in range [0, 2^21)
+    for idx in indices {
+        if *idx > EQUIHASH_INDICES_MAX {
+            return false;
+        }
+    }
+
+    true
+}
+
+// Prime modulus for permutation check: 2^64 - 59 (largest 64-bit prime)
+const PERMUTATION_PRIME: u128 = 18446744073709551557_u128;
+// Base for polynomial hash: prime > 2^21 (max index value)
+const PERMUTATION_BASE: u128 = 2097169_u128;
+// Offset added to challenge to ensure r > max index value (2^21)
+// This guarantees r - idx_val never underflows
+const CHALLENGE_OFFSET: u128 = 10000000000_u128;
+
+/// Computes a deterministic Fiat-Shamir challenge from the indices.
+/// This derives a "random" value r from the input data itself.
+fn compute_permutation_challenge(mut indices: Span<u32>) -> u128 {
+    let mut hash: u128 = 0;
+    let mut power: u128 = 1;
+
+    for idx in indices {
+        let idx_val: u128 = (*idx).into();
+        // idx_val < 2^21, power < 2^64, so product < 2^85 fits in u128
+        // hash < 2^64, adding < 2^85 still fits in u128
+        hash = (hash + idx_val * power) % PERMUTATION_PRIME;
+        power = (power * PERMUTATION_BASE) % PERMUTATION_PRIME;
+    }
+
+    (hash + CHALLENGE_OFFSET) % PERMUTATION_PRIME
+}
+
+/// Verifies that sorted_hint is a permutation of indices using the product check.
+/// Based on Schwartz-Zippel lemma: if ∏(r - indices[i]) == ∏(r - sorted_hint[i])
+/// for a random r, then the multisets are equal with overwhelming probability.
+fn verify_permutation(mut indices: Span<u32>, mut sorted_hint: Span<u32>, r: u128) -> bool {
+    let mut prod_indices: u128 = 1;
+    let mut prod_sorted: u128 = 1;
+
+    for idx in indices {
+        let idx_val: u128 = (*idx).into();
+        let sorted_val: u128 = (*sorted_hint.pop_front().unwrap()).into();
+
+        // r >= CHALLENGE_OFFSET > 2^21 > max_index, so r > idx_val always
+        let diff_idx = r - idx_val;
+        let diff_sorted = r - sorted_val;
+
+        prod_indices = (prod_indices * diff_idx) % PERMUTATION_PRIME;
+        prod_sorted = (prod_sorted * diff_sorted) % PERMUTATION_PRIME;
+    }
+
+    prod_indices == prod_sorted
+}
+
+/// Verifies that the span is strictly increasing (each element > previous).
+/// Uses pop_front for efficiency.
+fn is_strictly_increasing(mut span: Span<u32>) -> bool {
+    // Get first element, empty span is trivially increasing
+    let first = span.pop_front();
+    if first.is_none() {
+        return true;
+    }
+    let mut prev = *first.unwrap();
+
+    for idx in span {
+        if prev >= *idx {
+            return false;
+        }
+        prev = *idx;
+    }
+    true
+}
+
+/// Verifies that all indices are unique using a sorted hint.
+///
+/// This is an O(n) algorithm that leverages the prover/verifier paradigm:
+/// - The prover provides a `sorted_indices_hint` containing the same indices but sorted
+/// - The verifier checks:
+///   1. The hint is strictly increasing (guarantees all hint values are unique)
+///   2. The hint is a permutation of the original indices (via product check)
+///
+/// If both conditions hold, the original indices must all be unique.
+///
+/// # Arguments
+/// * `indices` - The original Equihash solution indices (512 values)
+/// * `sorted_indices_hint` - Hint from prover: same indices but sorted ascending
+///
+/// # Returns
+/// * `true` if all indices are unique, `false` otherwise
+pub fn is_unique_indices(indices: Span<u32>, sorted_indices_hint: Span<u32>) -> bool {
+    let len = indices.len();
+
+    // Length check: hint must have same length as indices
+    if sorted_indices_hint.len() != len {
+        return false;
+    }
+
+    // Trivial cases: empty or single element is always unique
+    if len <= 1 {
+        return true;
+    }
+
+    // Step 1: Verify sorted_indices_hint is strictly increasing
+    // This guarantees all values in the hint are unique
+    if !is_strictly_increasing(sorted_indices_hint) {
+        return false;
+    }
+
+    // Step 2: Verify sorted_indices_hint is a permutation of indices
+    // Using Schwartz-Zippel product check with Fiat-Shamir challenge
+    let r = compute_permutation_challenge(indices);
+    verify_permutation(indices, sorted_indices_hint, r)
+}
+
+// For each block, all 512 leaf hashes share the same:
+//   - Personalization ("ZcashPoW" + n + k)
+//   - Hash length (50 bytes for Zcash n=200, k=9)
+//   - Common input prefix (header = 140 bytes)
+//
+// By pre-computing a "base hasher" with these common elements, we:
+//   1. Compute the initial state (IV XOR params) only once
+//   2. Process the first 128 bytes (first compression block) only once
+//   3. For each leaf, clone the hasher and only process the remaining 12 bytes + 4-byte index
+fn build_equihash_header_bytes(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Array<u8> {
+    let mut bytes: Array<u8> = array![];
+
+    append_u32_le(ref bytes, *header.version);
+    append_digest(ref bytes, prev_block_hash);
+    append_digest(ref bytes, txid_root);
+    append_digest(ref bytes, *header.final_sapling_root);
+    append_u32_le(ref bytes, *header.time);
+    append_u32_le(ref bytes, *header.bits);
+    append_digest(ref bytes, *header.nonce);
+
+    bytes
+}
+
+/// Builds a base hasher pre-configured for Equihash with the full 140-byte header.
+/// The header is: version(4) + prev_block_hash(32) + txid_root(32) + final_sapling_root(32)
+///                + time(4) + bits(4) + nonce(32) = 140 bytes
+///
+/// Clone this hasher for each leaf hash, then update with just the 4-byte index.
+#[cfg(feature: "blake2b")]
+fn build_equihash_base_hasher(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Blake2bHasher {
+    // Create hasher with precomputed Equihash parameters (n=200, k=9)
+    let mut hasher = Blake2bParamsTrait::new()
+        .hash_length(EQUIHASH_HASH_OUTPUT_LENGTH)
+        .personal(EQUIHASH_PERSONALIZATION)
+        .to_state();
+
+    // Build the 140-byte header and process it
+    // This compresses the first block (128 bytes) and buffers the remaining 12 bytes
+    let header_bytes = build_equihash_header_bytes(header, prev_block_hash, txid_root);
+    hasher.update_span(header_bytes.span());
+
+    hasher
+}
+
+/// Wagner tree validator using u32-optimized nodes and first-block caching.
+/// This validates the Equihash solution by building the collision tree and verifying
+/// that all collisions are valid and the root hash is zero.
+#[cfg(feature: "blake2b")]
+pub fn wagner_tree_validator(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Result<(), ByteArray> {
+    let base_hasher = build_equihash_base_hasher(header, prev_block_hash, txid_root);
+    let indices_span = (*header.indices);
+
+    // Use u32-optimized tree validator (no expand_array, u32 operations)
+    let (ok, root) = tree_validator_cached_u32(
+        EQUIHASH_N, EQUIHASH_K, @base_hasher, indices_span, 0_usize, indices_span.len(),
+    );
+    if !ok {
+        return Result::Err(format!("[equihash] tree validation failed"));
+    }
+
+    // Root hash must be zero (single u32 element remaining after k=9 merges)
+    if !is_zero_root_u32(root) {
+        return Result::Err(format!("[equihash] root hash is not zero"));
+    }
+
+    Result::Ok(())
+}
+
+/// Fallback wagner_tree_validator when blake2b feature is not enabled.
+/// Uses the non-cached path with expand_array.
+#[cfg(not(feature: "blake2b"))]
+pub fn wagner_tree_validator(
+    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+) -> Result<(), ByteArray> {
+    // Build the 140-byte header for Equihash
+    let header_bytes = build_equihash_header_bytes(header, prev_block_hash, txid_root);
+    let indices_span = (*header.indices);
+    let collision_bytes: usize = collision_byte_length(EQUIHASH_N, EQUIHASH_K);
+
+    // Use the non-cached tree validator
+    let (ok, root) = tree_validator(
+        EQUIHASH_N,
+        EQUIHASH_K,
+        collision_bytes,
+        @header_bytes,
+        indices_span,
+        0_usize,
+        indices_span.len(),
+    );
+    if !ok {
+        return Result::Err(format!("[equihash] tree validation failed"));
+    }
+
+    // Root hash must have zero prefix
+    if !is_zero_prefix(root, collision_bytes) {
+        return Result::Err(format!("[equihash] root hash is not zero"));
+    }
+
+    Result::Ok(())
+}
+
 pub fn is_valid_solution_indices(
     n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
 ) -> bool {
@@ -489,47 +918,30 @@ pub fn is_valid_solution_indices(
 // Public API: header-level helpers
 // =====================
 
-/// Mirrors `CheckEquihashSolution` from `src/pow/pow.cpp` in zcashd.
 /// Builds the Equihash input (block header without nonce & solution), converts the
-/// nonce and solution into byte arrays, and runs the recursive Equihash validator.
+/// nonce into byte array, and runs the recursive Equihash validator with indices directly.
+///
+/// # Arguments
+/// * `header` - The block header containing the Equihash solution indices
+/// * `prev_block_hash` - Hash of the previous block
+/// * `txid_root` - Merkle root of transactions
+/// * `sorted_indices_hint` - Prover hint: the same indices sorted ascending (for O(n) uniqueness
+/// check)
 pub fn check_equihash_solution(
-    header: @Header, prev_block_hash: Digest, txid_root: Digest,
+    header: Header, prev_block_hash: Digest, txid_root: Digest, sorted_indices_hint: Span<u32>,
 ) -> Result<(), ByteArray> {
-    let input = build_equihash_input(header, prev_block_hash, txid_root);
-    let nonce_bytes = digest_to_le_bytes(*header.nonce);
-    let solution_bytes = solution_words_to_bytes(*header.solution);
-
-    if solution_bytes.len() != EQUIHASH_SOLUTION_SIZE_BYTES {
-        return Result::Err(
-            format!(
-                "[equihash] invalid solution length: expected {} bytes, got {}",
-                EQUIHASH_SOLUTION_SIZE_BYTES,
-                solution_bytes.len(),
-            ),
-        );
+    if !is_valid_solution_format(header.indices) {
+        return Result::Err(format!("[equihash] invalid solution format"));
     }
 
-    if is_valid_solution(EQUIHASH_N, EQUIHASH_K, input, nonce_bytes, solution_bytes) {
-        Result::Ok(())
-    } else {
-        Result::Err(format!("[equihash] invalid solution"))
-    }
-}
-
-/// Cairo version of Rust:
-/// pub fn is_valid_solution(n, k, input, nonce, soln_bytes) -> Result<(), Error>
-/// Here we just return `bool`.
-pub fn is_valid_solution(
-    n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, soln: Array<u8>,
-) -> bool {
-    // Decode minimal-encoded solution bytes -> indices
-    let (ok_indices, indices) = indices_from_minimal_bytes(n, k, soln);
-    if !ok_indices {
-        return false;
+    if !is_unique_indices(header.indices, sorted_indices_hint) {
+        return Result::Err(format!("[equihash] duplicate indices in solution"));
     }
 
-    // Recursive validation (like Rust is_valid_solution_recursive)
-    is_valid_solution_indices(n, k, input, nonce, indices)
+    match wagner_tree_validator(@header, prev_block_hash, txid_root) {
+        Result::Ok(()) => Result::Ok(()),
+        Result::Err(e) => Result::Err(e),
+    }
 }
 
 // =====================
@@ -550,14 +962,6 @@ fn build_equihash_input(header: @Header, prev_block_hash: Digest, txid_root: Dig
 fn digest_to_le_bytes(digest: Digest) -> Array<u8> {
     let mut bytes: Array<u8> = array![];
     append_digest(ref bytes, digest);
-    bytes
-}
-
-fn solution_words_to_bytes(solution: Span<u32>) -> Array<u8> {
-    let mut bytes: Array<u8> = array![];
-    for word in solution {
-        append_u32_le(ref bytes, *word);
-    }
     bytes
 }
 
@@ -589,1731 +993,3 @@ fn append_u32_le(ref bytes: Array<u8>, value: u32) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use core::array::ArrayTrait;
-    use utils::bit_shifts::{shl64, shr64};
-    use super::is_valid_solution;
-
-
-    // ---------------------------
-    // Helpers
-    // ---------------------------
-
-    // "block header"
-    fn input_block_header() -> Array<u8> {
-        array![
-            98_u8, 108_u8, 111_u8, 99_u8, 107_u8, 32_u8, 104_u8, 101_u8, 97_u8, 100_u8, 101_u8,
-            114_u8,
-        ]
-    }
-
-    // "Equihash is an asymmetric PoW based on the Generalised Birthday problem."
-    fn input_equihash_paper() -> Array<u8> {
-        array![
-            69_u8, 113_u8, 117_u8, 105_u8, 104_u8, 97_u8, 115_u8, 104_u8, 32_u8, 105_u8, 115_u8,
-            32_u8, 97_u8, 110_u8, 32_u8, 97_u8, 115_u8, 121_u8, 109_u8, 109_u8, 101_u8, 116_u8,
-            114_u8, 105_u8, 99_u8, 32_u8, 80_u8, 111_u8, 87_u8, 32_u8, 98_u8, 97_u8, 115_u8, 101_u8,
-            100_u8, 32_u8, 111_u8, 110_u8, 32_u8, 116_u8, 104_u8, 101_u8, 32_u8, 71_u8, 101_u8,
-            110_u8, 101_u8, 114_u8, 97_u8, 108_u8, 105_u8, 115_u8, 101_u8, 100_u8, 32_u8, 66_u8,
-            105_u8, 114_u8, 116_u8, 104_u8, 100_u8, 97_u8, 121_u8, 32_u8, 112_u8, 114_u8, 111_u8,
-            98_u8, 108_u8, 101_u8, 109_u8, 46_u8,
-        ]
-    }
-
-    // "Test case with 3+-way collision in the final round."
-    fn input_three_way_collision() -> Array<u8> {
-        array![
-            84_u8, 101_u8, 115_u8, 116_u8, 32_u8, 99_u8, 97_u8, 115_u8, 101_u8, 32_u8, 119_u8,
-            105_u8, 116_u8, 104_u8, 32_u8, 51_u8, 43_u8, 45_u8, 119_u8, 97_u8, 121_u8, 32_u8, 99_u8,
-            111_u8, 108_u8, 108_u8, 105_u8, 115_u8, 105_u8, 111_u8, 110_u8, 32_u8, 105_u8, 110_u8,
-            32_u8, 116_u8, 104_u8, 101_u8, 32_u8, 102_u8, 105_u8, 110_u8, 97_u8, 108_u8, 32_u8,
-            114_u8, 111_u8, 117_u8, 110_u8, 100_u8, 46_u8,
-        ]
-    }
-
-    // nonce = uint256(v) => LE bytes: first byte v, rest 0.
-    fn nonce_u8(v: u8) -> Array<u8> {
-        let mut a = array![];
-        a.append(v);
-        let mut i: usize = 1_usize;
-        while i < 32_usize {
-            a.append(0_u8);
-            i = i + 1_usize;
-        }
-        a
-    }
-
-    // nonce from explicit first two bytes (for 0x07f0 case).
-    fn nonce_two_bytes(b0: u8, b1: u8) -> Array<u8> {
-        let mut a = array![];
-        a.append(b0);
-        a.append(b1);
-        let mut i: usize = 2_usize;
-        while i < 32_usize {
-            a.append(0_u8);
-            i = i + 1_usize;
-        }
-        a
-    }
-
-    // Bit-pack Equihash indices into minimal solution bytes, matching Zcash's
-    // GetMinimalFromIndices.
-    // - n, k: Equihash parameters
-    // - indices: Array<u32> of length 2^k
-    // - bits_per_index = (n/(k+1)) + 1
-    fn minimal_from_indices(n: u32, k: u32, indices: Array<u32>) -> Array<u8> {
-        let c_bit_len: u32 = n / (k + 1_u32);
-        let bits_per_index: u32 = c_bit_len + 1_u32;
-
-        let span = indices.span();
-        let len = indices.len();
-
-        let mut acc_value: u64 = 0_u64;
-        let mut acc_bits: u32 = 0_u32;
-
-        let mut out = array![];
-
-        let mut i: usize = 0_usize;
-        while i < len {
-            let idx_u32: u32 = *span.at(i);
-            let idx_u64: u64 = idx_u32.into();
-            let mask: u64 = shl64(1_u64, bits_per_index) - 1_u64;
-            let val: u64 = idx_u64 & mask;
-
-            // Append bits_per_index bits of val (MSB-first) to the accumulator.
-            acc_value = shl64(acc_value, bits_per_index) | val;
-            acc_bits = acc_bits + bits_per_index;
-
-            // Flush bytes while we have >= 8 bits.
-            while acc_bits >= 8_u32 {
-                let shift: u32 = acc_bits - 8_u32;
-                let byte_u64: u64 = shr64(acc_value, shift) & 0xff_u64;
-                let byte: u8 = byte_u64.try_into().unwrap();
-                out.append(byte);
-
-                // Remove those top 8 bits.
-                let mask_acc: u64 = if shift == 0_u32 {
-                    0_u64
-                } else {
-                    shl64(1_u64, shift) - 1_u64
-                };
-                acc_value = acc_value & mask_acc;
-                acc_bits = acc_bits - 8_u32;
-            }
-
-            i = i + 1_usize;
-        }
-
-        if acc_bits > 0_u32 {
-            let shift: u32 = 8_u32 - acc_bits;
-            let byte_u64: u64 = shl64(acc_value, shift) & 0xff_u64;
-            let byte: u8 = byte_u64.try_into().unwrap();
-            out.append(byte);
-        }
-
-        out
-    }
-
-    // Convenience wrapper: compute minimal bytes and validate.
-    fn assert_valid_indices(
-        n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>,
-    ) {
-        let soln_bytes = minimal_from_indices(n, k, indices);
-        let ok = is_valid_solution(n, k, input, nonce, soln_bytes);
-        assert(ok, 'zcash_valid_should_be_valid');
-    }
-
-    // ---------------------------
-    // n = 96, k = 5 test vectors
-    // (all from Zcash VALID_TEST_VECTORS)
-    // ---------------------------
-
-    #[test]
-    fn test_valid_96_5_block_header_nonce_0() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        // 5 solutions for (96,5,"block header", nonce=0)
-        let indices1 = array![
-            976_u32, 126621_u32, 100174_u32, 123328_u32, 38477_u32, 105390_u32, 38834_u32,
-            90500_u32, 6411_u32, 116489_u32, 51107_u32, 129167_u32, 25557_u32, 92292_u32, 38525_u32,
-            56514_u32, 1110_u32, 98024_u32, 15426_u32, 74455_u32, 3185_u32, 84007_u32, 24328_u32,
-            36473_u32, 17427_u32, 129451_u32, 27556_u32, 119967_u32, 31704_u32, 62448_u32,
-            110460_u32, 117894_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(0_u8), indices1);
-
-        let indices2 = array![
-            1008_u32, 18280_u32, 34711_u32, 57439_u32, 3903_u32, 104059_u32, 81195_u32, 95931_u32,
-            58336_u32, 118687_u32, 67931_u32, 123026_u32, 64235_u32, 95595_u32, 84355_u32,
-            122946_u32, 8131_u32, 88988_u32, 45130_u32, 58986_u32, 59899_u32, 78278_u32, 94769_u32,
-            118158_u32, 25569_u32, 106598_u32, 44224_u32, 96285_u32, 54009_u32, 67246_u32,
-            85039_u32, 127667_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(0_u8), indices2);
-
-        let indices3 = array![
-            1278_u32, 107636_u32, 80519_u32, 127719_u32, 19716_u32, 130440_u32, 83752_u32,
-            121810_u32, 15337_u32, 106305_u32, 96940_u32, 117036_u32, 46903_u32, 101115_u32,
-            82294_u32, 118709_u32, 4915_u32, 70826_u32, 40826_u32, 79883_u32, 37902_u32, 95324_u32,
-            101092_u32, 112254_u32, 15536_u32, 68760_u32, 68493_u32, 125640_u32, 67620_u32,
-            108562_u32, 68035_u32, 93430_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(0_u8), indices3);
-
-        let indices4 = array![
-            3976_u32, 108868_u32, 80426_u32, 109742_u32, 33354_u32, 55962_u32, 68338_u32, 80112_u32,
-            26648_u32, 28006_u32, 64679_u32, 130709_u32, 41182_u32, 126811_u32, 56563_u32,
-            129040_u32, 4013_u32, 80357_u32, 38063_u32, 91241_u32, 30768_u32, 72264_u32, 97338_u32,
-            124455_u32, 5607_u32, 36901_u32, 67672_u32, 87377_u32, 17841_u32, 66985_u32, 77087_u32,
-            85291_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(0_u8), indices4);
-
-        let indices5 = array![
-            5970_u32, 21862_u32, 34861_u32, 102517_u32, 11849_u32, 104563_u32, 91620_u32,
-            110653_u32, 7619_u32, 52100_u32, 21162_u32, 112513_u32, 74964_u32, 79553_u32,
-            105558_u32, 127256_u32, 21905_u32, 112672_u32, 81803_u32, 92086_u32, 43695_u32,
-            97911_u32, 66587_u32, 104119_u32, 29017_u32, 61613_u32, 97690_u32, 106345_u32,
-            47428_u32, 98460_u32, 53655_u32, 109002_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(0_u8), indices5);
-    }
-
-    #[test]
-    fn test_valid_96_5_block_header_nonce_1() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            1911_u32, 96020_u32, 94086_u32, 96830_u32, 7895_u32, 51522_u32, 56142_u32, 62444_u32,
-            15441_u32, 100732_u32, 48983_u32, 64776_u32, 27781_u32, 85932_u32, 101138_u32,
-            114362_u32, 4497_u32, 14199_u32, 36249_u32, 41817_u32, 23995_u32, 93888_u32, 35798_u32,
-            96337_u32, 5530_u32, 82377_u32, 66438_u32, 85247_u32, 39332_u32, 78978_u32, 83015_u32,
-            123505_u32,
-        ];
-
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(1_u8), indices);
-    }
-
-    #[test]
-    fn test_valid_96_5_block_header_nonce_2() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            165_u32, 27290_u32, 87424_u32, 123403_u32, 5344_u32, 35125_u32, 49154_u32, 108221_u32,
-            8882_u32, 90328_u32, 77359_u32, 92348_u32, 54692_u32, 81690_u32, 115200_u32, 121929_u32,
-            18968_u32, 122421_u32, 32882_u32, 128517_u32, 56629_u32, 88083_u32, 88022_u32,
-            102461_u32, 35665_u32, 62833_u32, 95988_u32, 114502_u32, 39965_u32, 119818_u32,
-            45010_u32, 94889_u32,
-        ];
-
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(2_u8), indices);
-    }
-
-    #[test]
-    fn test_valid_96_5_block_header_nonce_10() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices1 = array![
-            1855_u32, 37525_u32, 81472_u32, 112062_u32, 11831_u32, 38873_u32, 45382_u32, 82417_u32,
-            11571_u32, 47965_u32, 71385_u32, 119369_u32, 13049_u32, 64810_u32, 26995_u32, 34659_u32,
-            6423_u32, 67533_u32, 88972_u32, 105540_u32, 30672_u32, 80244_u32, 39493_u32, 94598_u32,
-            17858_u32, 78496_u32, 35376_u32, 118645_u32, 50186_u32, 51838_u32, 70421_u32,
-            103703_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(10_u8), indices1);
-
-        let indices2 = array![
-            3671_u32, 125813_u32, 31502_u32, 78587_u32, 25500_u32, 83138_u32, 74685_u32, 98796_u32,
-            8873_u32, 119842_u32, 21142_u32, 55332_u32, 25571_u32, 122204_u32, 31433_u32, 80719_u32,
-            3955_u32, 49477_u32, 4225_u32, 129562_u32, 11837_u32, 21530_u32, 75841_u32, 120644_u32,
-            4653_u32, 101217_u32, 19230_u32, 113175_u32, 16322_u32, 24384_u32, 21271_u32, 96965_u32,
-        ];
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(10_u8), indices2);
-    }
-
-    #[test]
-    fn test_valid_96_5_block_header_nonce_11() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2570_u32, 20946_u32, 61727_u32, 130667_u32, 16426_u32, 62291_u32, 107177_u32,
-            112384_u32, 18464_u32, 125099_u32, 120313_u32, 127545_u32, 35035_u32, 73082_u32,
-            118591_u32, 120800_u32, 13800_u32, 32837_u32, 23607_u32, 86516_u32, 17339_u32,
-            114578_u32, 22053_u32, 85510_u32, 14913_u32, 42826_u32, 25168_u32, 121262_u32,
-            33673_u32, 114773_u32, 77592_u32, 83471_u32,
-        ];
-
-        assert_valid_indices(n, k, input_block_header(), nonce_u8(11_u8), indices);
-    }
-
-    // ---- 96,5: "Equihash is an asymmetric PoW ..." vectors ----
-
-    #[test]
-    fn test_valid_96_5_equihash_nonce_0() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices1 = array![
-            3130_u32, 83179_u32, 30454_u32, 107686_u32, 71240_u32, 88412_u32, 109700_u32,
-            114639_u32, 10024_u32, 32706_u32, 38019_u32, 113013_u32, 18399_u32, 92942_u32,
-            21094_u32, 112263_u32, 4146_u32, 30807_u32, 10631_u32, 73192_u32, 22216_u32, 90216_u32,
-            45581_u32, 125042_u32, 11256_u32, 119455_u32, 93603_u32, 110112_u32, 59851_u32,
-            91545_u32, 97403_u32, 111102_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(0_u8), indices1);
-
-        let indices2 = array![
-            3822_u32, 35317_u32, 47508_u32, 119823_u32, 37652_u32, 117039_u32, 69087_u32, 72058_u32,
-            13147_u32, 111794_u32, 65435_u32, 124256_u32, 22247_u32, 66272_u32, 30298_u32,
-            108956_u32, 13157_u32, 109175_u32, 37574_u32, 50978_u32, 31258_u32, 91519_u32,
-            52568_u32, 107874_u32, 14999_u32, 103687_u32, 27027_u32, 109468_u32, 36918_u32,
-            109660_u32, 42196_u32, 100424_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(0_u8), indices2);
-    }
-
-    #[test]
-    fn test_valid_96_5_equihash_nonce_1() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices1 = array![
-            2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(1_u8), indices1);
-
-        let indices2 = array![
-            16700_u32, 46276_u32, 21232_u32, 43153_u32, 22398_u32, 58511_u32, 47922_u32, 71816_u32,
-            23370_u32, 26222_u32, 39248_u32, 40137_u32, 65375_u32, 85794_u32, 69749_u32, 73259_u32,
-            23599_u32, 72821_u32, 42250_u32, 52383_u32, 35267_u32, 75893_u32, 52152_u32, 57181_u32,
-            27137_u32, 101117_u32, 45804_u32, 92838_u32, 29548_u32, 29574_u32, 37737_u32,
-            113624_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(1_u8), indices2);
-    }
-
-    #[test]
-    fn test_valid_96_5_equihash_nonce_2() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            6005_u32, 59843_u32, 55560_u32, 70361_u32, 39140_u32, 77856_u32, 44238_u32, 57702_u32,
-            32125_u32, 121969_u32, 108032_u32, 116542_u32, 37925_u32, 75404_u32, 48671_u32,
-            111682_u32, 6937_u32, 93582_u32, 53272_u32, 77545_u32, 13715_u32, 40867_u32, 73187_u32,
-            77853_u32, 7348_u32, 70313_u32, 24935_u32, 24978_u32, 25967_u32, 41062_u32, 58694_u32,
-            110036_u32,
-        ];
-
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(2_u8), indices);
-    }
-
-    #[test]
-    fn test_valid_96_5_equihash_nonce_10() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices1 = array![
-            968_u32, 90691_u32, 70664_u32, 112581_u32, 17233_u32, 79239_u32, 66772_u32, 92199_u32,
-            27801_u32, 44198_u32, 58712_u32, 122292_u32, 28227_u32, 126747_u32, 70925_u32,
-            118108_u32, 2876_u32, 76082_u32, 39335_u32, 113764_u32, 26643_u32, 60579_u32, 50853_u32,
-            70300_u32, 19640_u32, 31848_u32, 28672_u32, 87870_u32, 33574_u32, 50308_u32, 40291_u32,
-            61593_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(10_u8), indices1);
-
-        let indices2 = array![
-            1181_u32, 61261_u32, 75793_u32, 96302_u32, 36209_u32, 113590_u32, 79236_u32, 108781_u32,
-            8275_u32, 106510_u32, 11877_u32, 74550_u32, 45593_u32, 80595_u32, 71247_u32, 95783_u32,
-            2991_u32, 99117_u32, 56413_u32, 71287_u32, 10235_u32, 68286_u32, 22016_u32, 104685_u32,
-            51588_u32, 53344_u32, 56822_u32, 63386_u32, 63527_u32, 75772_u32, 93100_u32, 108542_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(10_u8), indices2);
-
-        let indices3 = array![
-            2229_u32, 30387_u32, 14573_u32, 115700_u32, 20018_u32, 124283_u32, 84929_u32, 91944_u32,
-            26341_u32, 64220_u32, 69433_u32, 82466_u32, 29778_u32, 101161_u32, 59334_u32, 79798_u32,
-            2533_u32, 104985_u32, 50731_u32, 111094_u32, 10619_u32, 80909_u32, 15555_u32,
-            119911_u32, 29028_u32, 42966_u32, 51958_u32, 86784_u32, 34561_u32, 97709_u32, 77126_u32,
-            127250_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(10_u8), indices3);
-
-        let indices4 = array![
-            15465_u32, 59017_u32, 93851_u32, 112478_u32, 24940_u32, 128791_u32, 26154_u32,
-            107289_u32, 24050_u32, 78626_u32, 51948_u32, 111573_u32, 35117_u32, 113754_u32,
-            36317_u32, 67606_u32, 21508_u32, 91486_u32, 28293_u32, 126983_u32, 23989_u32, 39722_u32,
-            60567_u32, 97243_u32, 26720_u32, 56243_u32, 60444_u32, 107530_u32, 40329_u32, 56467_u32,
-            91943_u32, 93737_u32,
-        ];
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(10_u8), indices4);
-    }
-
-    #[test]
-    fn test_valid_96_5_equihash_nonce_11() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            1120_u32, 77433_u32, 58243_u32, 76860_u32, 11411_u32, 96068_u32, 13150_u32, 35878_u32,
-            15049_u32, 88928_u32, 20101_u32, 104706_u32, 29215_u32, 73328_u32, 39498_u32, 83529_u32,
-            9233_u32, 124174_u32, 66731_u32, 97423_u32, 10823_u32, 92444_u32, 25647_u32, 127742_u32,
-            12207_u32, 46292_u32, 22018_u32, 120758_u32, 14411_u32, 46485_u32, 21828_u32, 57591_u32,
-        ];
-
-        assert_valid_indices(n, k, input_equihash_paper(), nonce_u8(11_u8), indices);
-    }
-
-    // ---- 96,5: "Test case with 3+-way collision ..." ----
-
-    #[test]
-    fn test_valid_96_5_three_way_collision_nonce_0x07f0() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices1 = array![
-            1162_u32, 129543_u32, 57488_u32, 82745_u32, 18311_u32, 115612_u32, 20603_u32,
-            112899_u32, 5635_u32, 103373_u32, 101651_u32, 125986_u32, 52160_u32, 70847_u32,
-            65152_u32, 101720_u32, 5810_u32, 43165_u32, 64589_u32, 105333_u32, 11347_u32, 63836_u32,
-            55495_u32, 96392_u32, 40767_u32, 81019_u32, 53976_u32, 94184_u32, 41650_u32, 114374_u32,
-            45109_u32, 57038_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices1,
-        );
-
-        let indices2 = array![
-            2321_u32, 121781_u32, 36792_u32, 51959_u32, 21685_u32, 67596_u32, 27992_u32, 59307_u32,
-            13462_u32, 118550_u32, 37537_u32, 55849_u32, 48994_u32, 58515_u32, 78703_u32,
-            100100_u32, 11189_u32, 98120_u32, 45242_u32, 116128_u32, 33260_u32, 47351_u32,
-            61550_u32, 116649_u32, 11927_u32, 20590_u32, 35907_u32, 107966_u32, 28779_u32,
-            57407_u32, 54793_u32, 104108_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices2,
-        );
-
-        let indices3 = array![
-            2321_u32, 121781_u32, 36792_u32, 51959_u32, 21685_u32, 67596_u32, 27992_u32, 59307_u32,
-            13462_u32, 118550_u32, 37537_u32, 55849_u32, 48994_u32, 78703_u32, 58515_u32,
-            100100_u32, 11189_u32, 98120_u32, 45242_u32, 116128_u32, 33260_u32, 47351_u32,
-            61550_u32, 116649_u32, 11927_u32, 20590_u32, 35907_u32, 107966_u32, 28779_u32,
-            57407_u32, 54793_u32, 104108_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices3,
-        );
-
-        let indices4 = array![
-            2321_u32, 121781_u32, 36792_u32, 51959_u32, 21685_u32, 67596_u32, 27992_u32, 59307_u32,
-            13462_u32, 118550_u32, 37537_u32, 55849_u32, 48994_u32, 100100_u32, 58515_u32,
-            78703_u32, 11189_u32, 98120_u32, 45242_u32, 116128_u32, 33260_u32, 47351_u32, 61550_u32,
-            116649_u32, 11927_u32, 20590_u32, 35907_u32, 107966_u32, 28779_u32, 57407_u32,
-            54793_u32, 104108_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices4,
-        );
-
-        let indices5 = array![
-            4488_u32, 83544_u32, 24912_u32, 62564_u32, 43206_u32, 62790_u32, 68462_u32, 125162_u32,
-            6805_u32, 8886_u32, 46937_u32, 54588_u32, 15509_u32, 126232_u32, 19426_u32, 27845_u32,
-            5959_u32, 56839_u32, 38806_u32, 102580_u32, 11255_u32, 63258_u32, 23442_u32, 39750_u32,
-            13022_u32, 22271_u32, 24110_u32, 52077_u32, 17422_u32, 124996_u32, 35725_u32,
-            101509_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices5,
-        );
-
-        let indices6 = array![
-            8144_u32, 33053_u32, 33933_u32, 77498_u32, 21356_u32, 110495_u32, 42805_u32, 116575_u32,
-            27360_u32, 48574_u32, 100682_u32, 102629_u32, 50754_u32, 64608_u32, 96899_u32,
-            120978_u32, 11924_u32, 74422_u32, 49240_u32, 106822_u32, 12787_u32, 68290_u32,
-            44314_u32, 50005_u32, 38056_u32, 49716_u32, 83299_u32, 95307_u32, 41798_u32, 82309_u32,
-            94504_u32, 96161_u32,
-        ];
-        assert_valid_indices(
-            n, k, input_three_way_collision(), nonce_two_bytes(0xf0_u8, 0x07_u8), indices6,
-        );
-    }
-    #[test]
-    fn test_valid_200_9_block_header_nonce_0_solution_00() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(0_u8);
-        let indices = array![
-            4313_u32, 223176_u32, 448870_u32, 1692641_u32, 214911_u32, 551567_u32, 1696002_u32,
-            1768726_u32, 500589_u32, 938660_u32, 724628_u32, 1319625_u32, 632093_u32, 1474613_u32,
-            665376_u32, 1222606_u32, 244013_u32, 528281_u32, 1741992_u32, 1779660_u32, 313314_u32,
-            996273_u32, 435612_u32, 1270863_u32, 337273_u32, 1385279_u32, 1031587_u32, 1147423_u32,
-            349396_u32, 734528_u32, 902268_u32, 1678799_u32, 10902_u32, 1231236_u32, 1454381_u32,
-            1873452_u32, 120530_u32, 2034017_u32, 948243_u32, 1160178_u32, 198008_u32, 1704079_u32,
-            1087419_u32, 1734550_u32, 457535_u32, 698704_u32, 649903_u32, 1029510_u32, 75564_u32,
-            1860165_u32, 1057819_u32, 1609847_u32, 449808_u32, 527480_u32, 1106201_u32, 1252890_u32,
-            207200_u32, 390061_u32, 1557573_u32, 1711408_u32, 396772_u32, 1026145_u32, 652307_u32,
-            1712346_u32, 10680_u32, 1027631_u32, 232412_u32, 974380_u32, 457702_u32, 1827006_u32,
-            1316524_u32, 1400456_u32, 91745_u32, 2032682_u32, 192412_u32, 710106_u32, 556298_u32,
-            1963798_u32, 1329079_u32, 1504143_u32, 102455_u32, 974420_u32, 639216_u32, 1647860_u32,
-            223846_u32, 529637_u32, 425255_u32, 680712_u32, 154734_u32, 541808_u32, 443572_u32,
-            798134_u32, 322981_u32, 1728849_u32, 1306504_u32, 1696726_u32, 57884_u32, 913814_u32,
-            607595_u32, 1882692_u32, 236616_u32, 1439683_u32, 420968_u32, 943170_u32, 1014827_u32,
-            1446980_u32, 1468636_u32, 1559477_u32, 1203395_u32, 1760681_u32, 1439278_u32,
-            1628494_u32, 195166_u32, 198686_u32, 349906_u32, 1208465_u32, 917335_u32, 1361918_u32,
-            937682_u32, 1885495_u32, 494922_u32, 1745948_u32, 1320024_u32, 1826734_u32, 847745_u32,
-            894084_u32, 1484918_u32, 1523367_u32, 7981_u32, 1450024_u32, 861459_u32, 1250305_u32,
-            226676_u32, 329669_u32, 339783_u32, 1935047_u32, 369590_u32, 1564617_u32, 939034_u32,
-            1908111_u32, 1147449_u32, 1315880_u32, 1276715_u32, 1428599_u32, 168956_u32,
-            1442649_u32, 766023_u32, 1171907_u32, 273361_u32, 1902110_u32, 1169410_u32, 1786006_u32,
-            413021_u32, 1465354_u32, 707998_u32, 1134076_u32, 977854_u32, 1604295_u32, 1369720_u32,
-            1486036_u32, 330340_u32, 1587177_u32, 502224_u32, 1313997_u32, 400402_u32, 1667228_u32,
-            889478_u32, 946451_u32, 470672_u32, 2019542_u32, 1023489_u32, 2067426_u32, 658974_u32,
-            876859_u32, 794443_u32, 1667524_u32, 440815_u32, 1099076_u32, 897391_u32, 1214133_u32,
-            953386_u32, 1932936_u32, 1100512_u32, 1362504_u32, 874364_u32, 975669_u32, 1277680_u32,
-            1412800_u32, 1227580_u32, 1857265_u32, 1312477_u32, 1514298_u32, 12478_u32, 219890_u32,
-            534265_u32, 1351062_u32, 65060_u32, 651682_u32, 627900_u32, 1331192_u32, 123915_u32,
-            865936_u32, 1218072_u32, 1732445_u32, 429968_u32, 1097946_u32, 947293_u32, 1323447_u32,
-            157573_u32, 1212459_u32, 923792_u32, 1943189_u32, 488881_u32, 1697044_u32, 915443_u32,
-            2095861_u32, 333566_u32, 732311_u32, 336101_u32, 1600549_u32, 575434_u32, 1978648_u32,
-            1071114_u32, 1473446_u32, 50017_u32, 54713_u32, 367891_u32, 2055483_u32, 561571_u32,
-            1714951_u32, 715652_u32, 1347279_u32, 584549_u32, 1642138_u32, 1002587_u32, 1125289_u32,
-            1364767_u32, 1382627_u32, 1387373_u32, 2054399_u32, 97237_u32, 1677265_u32, 707752_u32,
-            1265819_u32, 121088_u32, 1810711_u32, 1755448_u32, 1858538_u32, 444653_u32, 1130822_u32,
-            514258_u32, 1669752_u32, 578843_u32, 729315_u32, 1164894_u32, 1691366_u32, 15609_u32,
-            1917824_u32, 173620_u32, 587765_u32, 122779_u32, 2024998_u32, 804857_u32, 1619761_u32,
-            110829_u32, 1514369_u32, 410197_u32, 493788_u32, 637666_u32, 1765683_u32, 782619_u32,
-            1186388_u32, 494761_u32, 1536166_u32, 1582152_u32, 1868968_u32, 825150_u32, 1709404_u32,
-            1273757_u32, 1657222_u32, 817285_u32, 1955796_u32, 1014018_u32, 1961262_u32, 873632_u32,
-            1689675_u32, 985486_u32, 1008905_u32, 130394_u32, 897076_u32, 419669_u32, 535509_u32,
-            980696_u32, 1557389_u32, 1244581_u32, 1738170_u32, 197814_u32, 1879515_u32, 297204_u32,
-            1165124_u32, 883018_u32, 1677146_u32, 1545438_u32, 2017790_u32, 345577_u32, 1821269_u32,
-            761785_u32, 1014134_u32, 746829_u32, 751041_u32, 930466_u32, 1627114_u32, 507500_u32,
-            588000_u32, 1216514_u32, 1501422_u32, 991142_u32, 1378804_u32, 1797181_u32, 1976685_u32,
-            60742_u32, 780804_u32, 383613_u32, 645316_u32, 770302_u32, 952908_u32, 1105447_u32,
-            1878268_u32, 504292_u32, 1961414_u32, 693833_u32, 1198221_u32, 906863_u32, 1733938_u32,
-            1315563_u32, 2049718_u32, 230826_u32, 2064804_u32, 1224594_u32, 1434135_u32, 897097_u32,
-            1961763_u32, 993758_u32, 1733428_u32, 306643_u32, 1402222_u32, 532661_u32, 627295_u32,
-            453009_u32, 973231_u32, 1746809_u32, 1857154_u32, 263652_u32, 1683026_u32, 1082106_u32,
-            1840879_u32, 768542_u32, 1056514_u32, 888164_u32, 1529401_u32, 327387_u32, 1708909_u32,
-            961310_u32, 1453127_u32, 375204_u32, 878797_u32, 1311831_u32, 1969930_u32, 451358_u32,
-            1229838_u32, 583937_u32, 1537472_u32, 467427_u32, 1305086_u32, 812115_u32, 1065593_u32,
-            532687_u32, 1656280_u32, 954202_u32, 1318066_u32, 1164182_u32, 1963300_u32, 1232462_u32,
-            1722064_u32, 17572_u32, 923473_u32, 1715089_u32, 2079204_u32, 761569_u32, 1557392_u32,
-            1133336_u32, 1183431_u32, 175157_u32, 1560762_u32, 418801_u32, 927810_u32, 734183_u32,
-            825783_u32, 1844176_u32, 1951050_u32, 317246_u32, 336419_u32, 711727_u32, 1630506_u32,
-            634967_u32, 1595955_u32, 683333_u32, 1461390_u32, 458765_u32, 1834140_u32, 1114189_u32,
-            1761250_u32, 459168_u32, 1897513_u32, 1403594_u32, 1478683_u32, 29456_u32, 1420249_u32,
-            877950_u32, 1371156_u32, 767300_u32, 1848863_u32, 1607180_u32, 1819984_u32, 96859_u32,
-            1601334_u32, 171532_u32, 2068307_u32, 980009_u32, 2083421_u32, 1329455_u32, 2030243_u32,
-            69434_u32, 1965626_u32, 804515_u32, 1339113_u32, 396271_u32, 1252075_u32, 619032_u32,
-            2080090_u32, 84140_u32, 658024_u32, 507836_u32, 772757_u32, 154310_u32, 1580686_u32,
-            706815_u32, 1024831_u32, 66704_u32, 614858_u32, 256342_u32, 957013_u32, 1488503_u32,
-            1615769_u32, 1515550_u32, 1888497_u32, 245610_u32, 1333432_u32, 302279_u32, 776959_u32,
-            263110_u32, 1523487_u32, 623933_u32, 2013452_u32, 68977_u32, 122033_u32, 680726_u32,
-            1849411_u32, 426308_u32, 1292824_u32, 460128_u32, 1613657_u32, 234271_u32, 971899_u32,
-            1320730_u32, 1559313_u32, 1312540_u32, 1837403_u32, 1690310_u32, 2040071_u32,
-            149918_u32, 380012_u32, 785058_u32, 1675320_u32, 267071_u32, 1095925_u32, 1149690_u32,
-            1318422_u32, 361557_u32, 1376579_u32, 1587551_u32, 1715060_u32, 1224593_u32,
-            1581980_u32, 1354420_u32, 1850496_u32, 151947_u32, 748306_u32, 1987121_u32, 2070676_u32,
-            273794_u32, 981619_u32, 683206_u32, 1485056_u32, 766481_u32, 2047708_u32, 930443_u32,
-            2040726_u32, 1136227_u32, 1945705_u32, 1722044_u32, 1971986_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_1_solution_00() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            1505_u32, 1380774_u32, 200806_u32, 1787044_u32, 101056_u32, 1697952_u32, 281464_u32,
-            374899_u32, 263712_u32, 1532496_u32, 264180_u32, 637056_u32, 734225_u32, 1882676_u32,
-            1112004_u32, 2093109_u32, 193394_u32, 1459136_u32, 525171_u32, 657480_u32, 214528_u32,
-            1221365_u32, 574444_u32, 594726_u32, 501919_u32, 1309358_u32, 1740268_u32, 1989610_u32,
-            654491_u32, 1068055_u32, 919416_u32, 1993208_u32, 17599_u32, 1858176_u32, 1315176_u32,
-            1901532_u32, 108258_u32, 109600_u32, 1117445_u32, 1936058_u32, 70247_u32, 1036984_u32,
-            628234_u32, 1800109_u32, 149791_u32, 365740_u32, 345683_u32, 563554_u32, 21678_u32,
-            822781_u32, 1423722_u32, 1644228_u32, 792912_u32, 1409641_u32, 805060_u32, 2041985_u32,
-            453824_u32, 1003179_u32, 934427_u32, 1068834_u32, 629003_u32, 1456111_u32, 670049_u32,
-            1558594_u32, 19016_u32, 1343657_u32, 1698188_u32, 1865216_u32, 45723_u32, 1820952_u32,
-            1160970_u32, 1585983_u32, 422549_u32, 1973097_u32, 1296271_u32, 2006382_u32, 650084_u32,
-            809838_u32, 871727_u32, 1080419_u32, 28500_u32, 1471829_u32, 384406_u32, 619459_u32,
-            212041_u32, 1466258_u32, 481435_u32, 866461_u32, 145340_u32, 1403843_u32, 1339592_u32,
-            1405761_u32, 163425_u32, 1073771_u32, 285027_u32, 1488210_u32, 167744_u32, 1182267_u32,
-            1354059_u32, 2089602_u32, 921700_u32, 2059931_u32, 1704721_u32, 1853088_u32, 585171_u32,
-            739246_u32, 747551_u32, 1520527_u32, 590255_u32, 1175747_u32, 705292_u32, 998433_u32,
-            522014_u32, 1931179_u32, 1629531_u32, 1692879_u32, 588830_u32, 1799457_u32, 963672_u32,
-            1664237_u32, 775408_u32, 1926741_u32, 907030_u32, 1466738_u32, 784179_u32, 1972599_u32,
-            1494787_u32, 1598114_u32, 1736_u32, 1039487_u32, 88704_u32, 1302687_u32, 579526_u32,
-            1476728_u32, 1677992_u32, 1854526_u32, 432470_u32, 2062305_u32, 1471132_u32,
-            1747579_u32, 1521894_u32, 1917599_u32, 1590975_u32, 1936227_u32, 151871_u32,
-            1999775_u32, 224664_u32, 461809_u32, 704084_u32, 1306665_u32, 1316156_u32, 1529628_u32,
-            876811_u32, 2086004_u32, 1986383_u32, 2012147_u32, 1039505_u32, 1637502_u32,
-            1432721_u32, 1565477_u32, 110385_u32, 342650_u32, 659137_u32, 1285167_u32, 367416_u32,
-            2007586_u32, 445677_u32, 2084877_u32, 285692_u32, 1144365_u32, 988840_u32, 1990372_u32,
-            748425_u32, 1617758_u32, 1267712_u32, 1510433_u32, 152291_u32, 1256291_u32, 1722179_u32,
-            1995439_u32, 864844_u32, 1623380_u32, 1071853_u32, 1731862_u32, 699978_u32, 1407662_u32,
-            1048047_u32, 1849702_u32, 962900_u32, 1083340_u32, 1378752_u32, 1534902_u32, 11843_u32,
-            115329_u32, 454796_u32, 548919_u32, 148184_u32, 1686936_u32, 862432_u32, 873854_u32,
-            60753_u32, 999864_u32, 385959_u32, 1528101_u32, 534420_u32, 678401_u32, 590419_u32,
-            1962518_u32, 54984_u32, 1141820_u32, 243305_u32, 1349970_u32, 599681_u32, 1817233_u32,
-            1632537_u32, 1698724_u32, 580004_u32, 673073_u32, 1403350_u32, 2026104_u32, 758881_u32,
-            970056_u32, 1717966_u32, 2062827_u32, 19624_u32, 148580_u32, 609748_u32, 1588928_u32,
-            456321_u32, 834920_u32, 700532_u32, 1682606_u32, 20012_u32, 441139_u32, 1591072_u32,
-            1923394_u32, 194034_u32, 1741063_u32, 1156906_u32, 1983067_u32, 20703_u32, 1939972_u32,
-            604581_u32, 963600_u32, 128170_u32, 731716_u32, 606773_u32, 1626824_u32, 139460_u32,
-            1386775_u32, 521911_u32, 2043473_u32, 392180_u32, 449532_u32, 895678_u32, 1453340_u32,
-            7085_u32, 598416_u32, 1514260_u32, 2061068_u32, 279532_u32, 678363_u32, 943255_u32,
-            1405306_u32, 119114_u32, 2075865_u32, 592839_u32, 1972064_u32, 254647_u32, 2078288_u32,
-            946282_u32, 1567138_u32, 120422_u32, 767626_u32, 213242_u32, 448366_u32, 438457_u32,
-            1768467_u32, 853790_u32, 1509505_u32, 735780_u32, 1979631_u32, 1461410_u32, 1462050_u32,
-            739008_u32, 1572606_u32, 920754_u32, 1507358_u32, 12883_u32, 1681167_u32, 1308399_u32,
-            1839490_u32, 85599_u32, 1387522_u32, 703262_u32, 1949514_u32, 18523_u32, 1236125_u32,
-            669105_u32, 1464132_u32, 68670_u32, 2085647_u32, 333393_u32, 1731573_u32, 21714_u32,
-            637827_u32, 985912_u32, 2091029_u32, 84065_u32, 1688993_u32, 1574405_u32, 1899543_u32,
-            134032_u32, 179206_u32, 671016_u32, 1118310_u32, 288960_u32, 861994_u32, 622074_u32,
-            1738892_u32, 10936_u32, 343910_u32, 598016_u32, 1741971_u32, 586348_u32, 1956071_u32,
-            851053_u32, 1715626_u32, 531385_u32, 1213667_u32, 1093995_u32, 1863757_u32, 630365_u32,
-            1851894_u32, 1328101_u32, 1770446_u32, 31900_u32, 734027_u32, 1078651_u32, 1701535_u32,
-            123276_u32, 1916343_u32, 581822_u32, 1681706_u32, 573135_u32, 818091_u32, 1454710_u32,
-            2052521_u32, 1150284_u32, 1451159_u32, 1482280_u32, 1811430_u32, 26321_u32, 785837_u32,
-            877980_u32, 2073103_u32, 107324_u32, 727248_u32, 1785460_u32, 1840517_u32, 184560_u32,
-            185640_u32, 364103_u32, 1878753_u32, 518459_u32, 1984029_u32, 964109_u32, 1884200_u32,
-            74003_u32, 527272_u32, 516232_u32, 711247_u32, 148582_u32, 209254_u32, 634610_u32,
-            1534140_u32, 376714_u32, 1573267_u32, 421225_u32, 1265101_u32, 1078858_u32, 1374310_u32,
-            1806283_u32, 2091298_u32, 23392_u32, 389637_u32, 413663_u32, 1066737_u32, 226164_u32,
-            762552_u32, 1048220_u32, 1583397_u32, 40092_u32, 277435_u32, 775449_u32, 1533894_u32,
-            202582_u32, 390703_u32, 346741_u32, 1027320_u32, 523034_u32, 809424_u32, 584882_u32,
-            1296934_u32, 528062_u32, 733331_u32, 1212771_u32, 1958651_u32, 653372_u32, 1313962_u32,
-            1366332_u32, 1784489_u32, 1542466_u32, 1580386_u32, 1628948_u32, 2000957_u32, 57069_u32,
-            1398636_u32, 1250431_u32, 1698486_u32, 57289_u32, 596009_u32, 582428_u32, 966130_u32,
-            167657_u32, 1025537_u32, 1227498_u32, 1630134_u32, 234060_u32, 1285209_u32, 265623_u32,
-            1165779_u32, 68485_u32, 632055_u32, 96019_u32, 1854676_u32, 98410_u32, 158575_u32,
-            168035_u32, 1296171_u32, 158847_u32, 1243959_u32, 977212_u32, 1113647_u32, 363568_u32,
-            891940_u32, 954593_u32, 1987111_u32, 90101_u32, 133251_u32, 1136222_u32, 1255117_u32,
-            543075_u32, 732768_u32, 749576_u32, 1174878_u32, 422226_u32, 1854657_u32, 1143029_u32,
-            1457135_u32, 927105_u32, 1137382_u32, 1566306_u32, 1661926_u32, 103057_u32, 425126_u32,
-            698089_u32, 1774942_u32, 911019_u32, 1793511_u32, 1623559_u32, 2002409_u32, 457796_u32,
-            1196971_u32, 724257_u32, 1811147_u32, 956269_u32, 1165590_u32, 1137531_u32, 1381215_u32,
-            201063_u32, 1938529_u32, 986021_u32, 1297857_u32, 921334_u32, 1259083_u32, 1440074_u32,
-            1939366_u32, 232907_u32, 747213_u32, 1349009_u32, 1945364_u32, 689906_u32, 1116453_u32,
-            1904207_u32, 1916192_u32, 229793_u32, 1576982_u32, 1420059_u32, 1644978_u32, 278248_u32,
-            2024807_u32, 297914_u32, 419798_u32, 555747_u32, 712605_u32, 1012424_u32, 1428921_u32,
-            890113_u32, 1822645_u32, 1082368_u32, 1392894_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_1_solution_01() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            13396_u32, 1502141_u32, 934546_u32, 1419227_u32, 445798_u32, 1676403_u32, 643830_u32,
-            1421927_u32, 45286_u32, 1160795_u32, 117864_u32, 542369_u32, 501065_u32, 1834465_u32,
-            544881_u32, 1258964_u32, 157233_u32, 888851_u32, 1707333_u32, 2042954_u32, 1067373_u32,
-            1959382_u32, 1081841_u32, 1528092_u32, 355787_u32, 1506512_u32, 488244_u32, 1901282_u32,
-            842029_u32, 1045169_u32, 1014084_u32, 1718668_u32, 184257_u32, 1419101_u32, 572200_u32,
-            1554883_u32, 240034_u32, 1489590_u32, 1108495_u32, 1346106_u32, 357644_u32, 1206700_u32,
-            1019151_u32, 1817512_u32, 827374_u32, 945127_u32, 885925_u32, 1320873_u32, 292347_u32,
-            918571_u32, 436037_u32, 973478_u32, 321703_u32, 1853464_u32, 595802_u32, 894629_u32,
-            426733_u32, 849916_u32, 1618173_u32, 1877920_u32, 1260413_u32, 1913655_u32, 1413450_u32,
-            1821154_u32, 39823_u32, 934676_u32, 1415329_u32, 1899092_u32, 248682_u32, 1500533_u32,
-            603937_u32, 2061626_u32, 126829_u32, 490133_u32, 1491924_u32, 1591619_u32, 474135_u32,
-            1328233_u32, 878943_u32, 2058462_u32, 86988_u32, 911439_u32, 767925_u32, 1499098_u32,
-            323431_u32, 335282_u32, 1398512_u32, 1561768_u32, 142731_u32, 1568252_u32, 459703_u32,
-            1378588_u32, 443971_u32, 730680_u32, 723742_u32, 1301913_u32, 120606_u32, 402225_u32,
-            659692_u32, 878779_u32, 967663_u32, 1022156_u32, 1573638_u32, 1710098_u32, 228789_u32,
-            483630_u32, 565528_u32, 1137688_u32, 569834_u32, 1100519_u32, 1315274_u32, 1613960_u32,
-            323958_u32, 1035040_u32, 342578_u32, 1395004_u32, 693886_u32, 778875_u32, 1128411_u32,
-            1424459_u32, 470124_u32, 1001591_u32, 1265290_u32, 1962023_u32, 898247_u32, 1156840_u32,
-            1424257_u32, 1463363_u32, 29922_u32, 1694756_u32, 109027_u32, 1777528_u32, 115450_u32,
-            1525306_u32, 1347575_u32, 1835714_u32, 279549_u32, 1320423_u32, 1162056_u32,
-            1668629_u32, 934706_u32, 1283078_u32, 1115477_u32, 1231121_u32, 60882_u32, 1677375_u32,
-            729195_u32, 1560584_u32, 199789_u32, 770485_u32, 532152_u32, 1939788_u32, 225610_u32,
-            1517013_u32, 1952643_u32, 2085389_u32, 453439_u32, 1202000_u32, 902342_u32, 1303946_u32,
-            208859_u32, 493534_u32, 1185220_u32, 1943780_u32, 639093_u32, 1123038_u32, 1247020_u32,
-            1359794_u32, 354070_u32, 1207821_u32, 463570_u32, 650864_u32, 846889_u32, 875335_u32,
-            1220142_u32, 1929715_u32, 222307_u32, 849285_u32, 859051_u32, 1961534_u32, 419719_u32,
-            1330637_u32, 441693_u32, 1566326_u32, 590324_u32, 1106956_u32, 1198428_u32, 1208601_u32,
-            1194514_u32, 1714365_u32, 1549673_u32, 1766871_u32, 36406_u32, 315544_u32, 313443_u32,
-            1553541_u32, 769731_u32, 1608444_u32, 1457538_u32, 1893815_u32, 192649_u32, 1030632_u32,
-            282298_u32, 846640_u32, 287483_u32, 336140_u32, 541071_u32, 1079100_u32, 139955_u32,
-            404958_u32, 1306603_u32, 1734441_u32, 843559_u32, 1448208_u32, 1273901_u32, 1715116_u32,
-            547237_u32, 1060287_u32, 629301_u32, 1036790_u32, 733471_u32, 1236082_u32, 1073097_u32,
-            1137292_u32, 78721_u32, 365289_u32, 321250_u32, 730155_u32, 505572_u32, 1570719_u32,
-            1272465_u32, 1762855_u32, 200602_u32, 2002477_u32, 376698_u32, 586952_u32, 574825_u32,
-            1774405_u32, 1739907_u32, 1910482_u32, 321686_u32, 1711532_u32, 514504_u32, 769967_u32,
-            419504_u32, 1565290_u32, 586517_u32, 1474371_u32, 394689_u32, 802951_u32, 1529816_u32,
-            2003281_u32, 1025904_u32, 1789059_u32, 1557849_u32, 1649570_u32, 22351_u32, 1020349_u32,
-            799545_u32, 1167424_u32, 372784_u32, 822777_u32, 1331906_u32, 1487316_u32, 147912_u32,
-            779616_u32, 503790_u32, 591742_u32, 831949_u32, 1009009_u32, 846119_u32, 1154281_u32,
-            160278_u32, 1306827_u32, 972322_u32, 1632998_u32, 925417_u32, 1862659_u32, 1167562_u32,
-            1487753_u32, 225867_u32, 1170797_u32, 595379_u32, 1116885_u32, 580973_u32, 823382_u32,
-            825674_u32, 1756426_u32, 123619_u32, 578961_u32, 1105801_u32, 1478751_u32, 615784_u32,
-            1248585_u32, 1555596_u32, 1823147_u32, 291494_u32, 1439342_u32, 1362238_u32,
-            2020172_u32, 416541_u32, 808362_u32, 1087192_u32, 1279428_u32, 145445_u32, 1476821_u32,
-            589962_u32, 1007778_u32, 502785_u32, 578289_u32, 1347895_u32, 1468692_u32, 397887_u32,
-            1422580_u32, 873197_u32, 1547340_u32, 544937_u32, 1706334_u32, 1240996_u32, 1394517_u32,
-            60961_u32, 173017_u32, 1198379_u32, 1875710_u32, 164983_u32, 1244552_u32, 786241_u32,
-            1163907_u32, 182496_u32, 445793_u32, 765554_u32, 1044380_u32, 274547_u32, 1626395_u32,
-            1621315_u32, 1632207_u32, 168375_u32, 924818_u32, 1355514_u32, 1888896_u32, 1060612_u32,
-            1309397_u32, 1247169_u32, 2065604_u32, 537737_u32, 849561_u32, 690965_u32, 1778198_u32,
-            834911_u32, 1341821_u32, 1239610_u32, 1468591_u32, 90037_u32, 516053_u32, 906189_u32,
-            1302107_u32, 544896_u32, 1319300_u32, 1944402_u32, 2080316_u32, 332213_u32, 469952_u32,
-            949830_u32, 1187792_u32, 400278_u32, 459757_u32, 1306417_u32, 1772258_u32, 135309_u32,
-            995973_u32, 571189_u32, 2041352_u32, 375936_u32, 389143_u32, 1350844_u32, 1611928_u32,
-            294058_u32, 577712_u32, 820473_u32, 2062905_u32, 435690_u32, 1918441_u32, 1160042_u32,
-            1437969_u32, 60304_u32, 817774_u32, 956977_u32, 1785565_u32, 116153_u32, 479573_u32,
-            1291516_u32, 1468918_u32, 260814_u32, 1568016_u32, 695030_u32, 1082881_u32, 1175273_u32,
-            1679631_u32, 1219376_u32, 1680268_u32, 173493_u32, 2060876_u32, 1391045_u32,
-            1554572_u32, 795587_u32, 931051_u32, 1528751_u32, 1810166_u32, 1049000_u32, 1089918_u32,
-            1780849_u32, 2080247_u32, 1409007_u32, 1720471_u32, 1726930_u32, 2048510_u32,
-            202301_u32, 1229629_u32, 910467_u32, 1501208_u32, 249207_u32, 758814_u32, 386350_u32,
-            1680387_u32, 259000_u32, 824989_u32, 268126_u32, 416050_u32, 304924_u32, 1411322_u32,
-            534678_u32, 883265_u32, 211439_u32, 1915547_u32, 1954195_u32, 1987528_u32, 682149_u32,
-            1798395_u32, 766421_u32, 1964526_u32, 345778_u32, 739906_u32, 1698586_u32, 1980612_u32,
-            1207132_u32, 1863904_u32, 1586749_u32, 1798519_u32, 89627_u32, 322371_u32, 1448894_u32,
-            1821630_u32, 771946_u32, 845162_u32, 1627288_u32, 1848711_u32, 247727_u32, 1578777_u32,
-            425393_u32, 1141980_u32, 738940_u32, 2054340_u32, 1156205_u32, 1662664_u32, 315398_u32,
-            956023_u32, 867847_u32, 935583_u32, 559412_u32, 1538514_u32, 1291871_u32, 1371526_u32,
-            925807_u32, 2038575_u32, 1099192_u32, 1213875_u32, 989415_u32, 1590364_u32, 1137142_u32,
-            1456911_u32, 148404_u32, 1829533_u32, 171283_u32, 355992_u32, 231384_u32, 1712830_u32,
-            380050_u32, 1531904_u32, 205155_u32, 785766_u32, 794141_u32, 1821460_u32, 536969_u32,
-            826105_u32, 915018_u32, 1727720_u32, 473495_u32, 575484_u32, 1511034_u32, 1752204_u32,
-            1030559_u32, 1173930_u32, 1566670_u32, 1684100_u32, 545434_u32, 1644431_u32, 838096_u32,
-            1830099_u32, 714438_u32, 1058571_u32, 986457_u32, 1275490_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    #[available_gas(10000000000000000)]
-    fn test_valid_200_9_block_header_nonce_2_solution_00() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(2_u8);
-        let indices = array![
-            85_u32, 2041581_u32, 739509_u32, 1038120_u32, 95814_u32, 1449199_u32, 566808_u32,
-            1970271_u32, 22351_u32, 1033277_u32, 351539_u32, 378679_u32, 370613_u32, 1217658_u32,
-            744902_u32, 2054863_u32, 128384_u32, 2048133_u32, 1422405_u32, 1711301_u32, 266020_u32,
-            338919_u32, 1851784_u32, 1923279_u32, 344519_u32, 939493_u32, 1254831_u32, 1365416_u32,
-            658643_u32, 1827109_u32, 742476_u32, 2019543_u32, 7557_u32, 1416156_u32, 42164_u32,
-            1108616_u32, 1324398_u32, 1502720_u32, 1471471_u32, 1734206_u32, 51676_u32, 532090_u32,
-            634806_u32, 1747514_u32, 481844_u32, 1488478_u32, 690106_u32, 1838033_u32, 93690_u32,
-            1442016_u32, 977262_u32, 1136782_u32, 239698_u32, 1964439_u32, 1032494_u32, 2041403_u32,
-            463135_u32, 1204579_u32, 693303_u32, 1522068_u32, 880410_u32, 2021579_u32, 1108504_u32,
-            1718764_u32, 3462_u32, 1916805_u32, 1727074_u32, 1789966_u32, 562318_u32, 1651780_u32,
-            1332270_u32, 1995649_u32, 295751_u32, 2023013_u32, 1119902_u32, 1690352_u32,
-            1293091_u32, 2056850_u32, 1974345_u32, 2044869_u32, 78574_u32, 899703_u32, 1106267_u32,
-            1286448_u32, 1303134_u32, 1850087_u32, 1355112_u32, 1776010_u32, 1031239_u32,
-            1851498_u32, 1153488_u32, 1243952_u32, 1163993_u32, 1977728_u32, 1328544_u32,
-            1612102_u32, 9487_u32, 233220_u32, 998029_u32, 1173368_u32, 549226_u32, 2073453_u32,
-            871154_u32, 1572100_u32, 46216_u32, 739886_u32, 1234167_u32, 1572986_u32, 374817_u32,
-            878325_u32, 910917_u32, 1079476_u32, 9548_u32, 961914_u32, 1057590_u32, 1411096_u32,
-            973096_u32, 1060957_u32, 1188074_u32, 1721366_u32, 465242_u32, 2055339_u32, 971225_u32,
-            1830281_u32, 526459_u32, 2042659_u32, 746133_u32, 1985292_u32, 7405_u32, 1510070_u32,
-            385903_u32, 2095485_u32, 468941_u32, 1679477_u32, 757944_u32, 1622263_u32, 246823_u32,
-            695851_u32, 444054_u32, 846202_u32, 321170_u32, 1678719_u32, 928172_u32, 1531270_u32,
-            13258_u32, 342299_u32, 639214_u32, 1919221_u32, 412214_u32, 430924_u32, 787608_u32,
-            1968276_u32, 32804_u32, 791991_u32, 524319_u32, 1083379_u32, 568152_u32, 1875970_u32,
-            753609_u32, 1958222_u32, 44322_u32, 324266_u32, 1072444_u32, 1182703_u32, 133944_u32,
-            1208050_u32, 900653_u32, 1614070_u32, 373367_u32, 1363285_u32, 663351_u32, 1459703_u32,
-            578444_u32, 1419137_u32, 1163520_u32, 1922722_u32, 65157_u32, 1631833_u32, 1034031_u32,
-            1487396_u32, 723173_u32, 1724173_u32, 1482982_u32, 1644877_u32, 384747_u32, 909984_u32,
-            1275503_u32, 2036514_u32, 610392_u32, 1093084_u32, 913780_u32, 1924334_u32, 11137_u32,
-            1546273_u32, 61787_u32, 295562_u32, 319377_u32, 2057614_u32, 1229059_u32, 2010647_u32,
-            209286_u32, 1287454_u32, 1013313_u32, 1747506_u32, 271940_u32, 1520544_u32, 1018674_u32,
-            1063669_u32, 185227_u32, 1219872_u32, 1288529_u32, 1548657_u32, 344601_u32, 1898125_u32,
-            1755668_u32, 1992858_u32, 890818_u32, 1100957_u32, 1565899_u32, 1575128_u32,
-            1207190_u32, 1821158_u32, 1999048_u32, 2022807_u32, 19362_u32, 2055304_u32, 757990_u32,
-            2088728_u32, 478320_u32, 1006345_u32, 509532_u32, 1966851_u32, 160002_u32, 648308_u32,
-            414679_u32, 1022972_u32, 528460_u32, 1898952_u32, 919894_u32, 1918492_u32, 154904_u32,
-            1997802_u32, 1528735_u32, 1687070_u32, 240714_u32, 1414676_u32, 1400402_u32,
-            1763165_u32, 381766_u32, 1044133_u32, 619868_u32, 1519386_u32, 1248422_u32, 1409298_u32,
-            1754871_u32, 2015118_u32, 1739_u32, 499886_u32, 1642104_u32, 2069348_u32, 437356_u32,
-            609873_u32, 491378_u32, 1137963_u32, 89811_u32, 1626714_u32, 873752_u32, 1548730_u32,
-            1114856_u32, 1941590_u32, 1481869_u32, 1625018_u32, 59629_u32, 668173_u32, 315591_u32,
-            733560_u32, 803171_u32, 1801431_u32, 1294776_u32, 1914531_u32, 253597_u32, 1771037_u32,
-            650342_u32, 1014718_u32, 375289_u32, 519529_u32, 1447780_u32, 1900126_u32, 8241_u32,
-            1229781_u32, 777968_u32, 1198408_u32, 104296_u32, 2030372_u32, 683340_u32, 1454000_u32,
-            91445_u32, 100079_u32, 645496_u32, 824897_u32, 392258_u32, 1740230_u32, 1525343_u32,
-            2069444_u32, 110826_u32, 1097701_u32, 1069615_u32, 1960595_u32, 530572_u32, 1028831_u32,
-            999251_u32, 1458171_u32, 146008_u32, 1135021_u32, 867825_u32, 1398554_u32, 397922_u32,
-            818160_u32, 587611_u32, 1867232_u32, 11088_u32, 414753_u32, 572774_u32, 2060307_u32,
-            407170_u32, 687100_u32, 1002378_u32, 1924055_u32, 225264_u32, 1608839_u32, 792486_u32,
-            1925598_u32, 470948_u32, 519691_u32, 700762_u32, 1434860_u32, 164901_u32, 1277475_u32,
-            377305_u32, 1816065_u32, 526937_u32, 1419265_u32, 639397_u32, 690184_u32, 259943_u32,
-            444998_u32, 672324_u32, 836053_u32, 601877_u32, 1693911_u32, 1108479_u32, 1809555_u32,
-            147947_u32, 796744_u32, 732775_u32, 1441222_u32, 325070_u32, 1809776_u32, 1873763_u32,
-            2013982_u32, 481882_u32, 1288648_u32, 1653390_u32, 1654906_u32, 532739_u32, 2062844_u32,
-            758222_u32, 1372565_u32, 339507_u32, 1224640_u32, 1392890_u32, 1850326_u32, 1130365_u32,
-            1924596_u32, 1177208_u32, 1363642_u32, 384241_u32, 515152_u32, 1164040_u32, 2004909_u32,
-            609791_u32, 1575213_u32, 1671915_u32, 1691266_u32, 3039_u32, 1774544_u32, 200172_u32,
-            273877_u32, 420816_u32, 737235_u32, 986055_u32, 1164239_u32, 165598_u32, 265509_u32,
-            1009133_u32, 2062342_u32, 758743_u32, 1489470_u32, 1260158_u32, 1924360_u32, 208628_u32,
-            1135455_u32, 794209_u32, 1067104_u32, 469480_u32, 1795800_u32, 1183662_u32, 1360938_u32,
-            335183_u32, 822888_u32, 831116_u32, 2088169_u32, 399584_u32, 1836326_u32, 1174096_u32,
-            2034335_u32, 95734_u32, 1427706_u32, 1593344_u32, 2070787_u32, 305103_u32, 459806_u32,
-            1134106_u32, 1581586_u32, 304533_u32, 1761123_u32, 454382_u32, 1620968_u32, 974160_u32,
-            1661165_u32, 1984968_u32, 2006168_u32, 143936_u32, 1576427_u32, 1420916_u32,
-            2050868_u32, 239423_u32, 1955755_u32, 713829_u32, 1553644_u32, 613116_u32, 653092_u32,
-            957406_u32, 1332874_u32, 634343_u32, 1504804_u32, 1539492_u32, 1652920_u32, 29255_u32,
-            84313_u32, 134872_u32, 1722963_u32, 936125_u32, 1636028_u32, 1518342_u32, 1910113_u32,
-            74089_u32, 1517035_u32, 141099_u32, 1837859_u32, 91886_u32, 1841153_u32, 483590_u32,
-            1276988_u32, 94868_u32, 209194_u32, 613253_u32, 1062768_u32, 289463_u32, 1150432_u32,
-            1216070_u32, 2086920_u32, 226473_u32, 1630691_u32, 482394_u32, 1837175_u32, 389596_u32,
-            2002601_u32, 395772_u32, 870173_u32, 43107_u32, 688649_u32, 936340_u32, 1235157_u32,
-            189041_u32, 1855656_u32, 597803_u32, 1251423_u32, 472775_u32, 1688197_u32, 1286637_u32,
-            1760949_u32, 930937_u32, 1072689_u32, 1187497_u32, 1784673_u32, 58620_u32, 1436417_u32,
-            146777_u32, 1677387_u32, 66982_u32, 746844_u32, 945993_u32, 1703252_u32, 347963_u32,
-            945075_u32, 445864_u32, 1694069_u32, 946355_u32, 1646534_u32, 1769893_u32, 1806674_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_2_solution_01() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(2_u8);
-        let indices = array![
-            2280_u32, 1675737_u32, 1241864_u32, 1426081_u32, 529325_u32, 1356538_u32, 1546188_u32,
-            2018466_u32, 113218_u32, 1885133_u32, 750288_u32, 1896938_u32, 785567_u32, 802607_u32,
-            1597047_u32, 1985969_u32, 132292_u32, 1612427_u32, 551147_u32, 1732380_u32, 1140541_u32,
-            1246254_u32, 1371957_u32, 1567864_u32, 369405_u32, 1582447_u32, 1726106_u32,
-            1947007_u32, 435161_u32, 1369789_u32, 928581_u32, 1556123_u32, 241507_u32, 1653097_u32,
-            395601_u32, 975278_u32, 633072_u32, 1541996_u32, 1250446_u32, 1740729_u32, 545122_u32,
-            1930170_u32, 980220_u32, 1098305_u32, 1158689_u32, 1369613_u32, 1570322_u32,
-            1726377_u32, 438386_u32, 783277_u32, 968764_u32, 1057094_u32, 559257_u32, 1187476_u32,
-            1228488_u32, 2074064_u32, 813312_u32, 1810708_u32, 1064164_u32, 2087729_u32, 923610_u32,
-            1552562_u32, 1327854_u32, 1735362_u32, 32630_u32, 1981975_u32, 310780_u32, 1158178_u32,
-            263597_u32, 363824_u32, 2052751_u32, 2073086_u32, 45706_u32, 847451_u32, 584418_u32,
-            813295_u32, 716033_u32, 968866_u32, 854478_u32, 1868422_u32, 594854_u32, 1676760_u32,
-            1410774_u32, 2055426_u32, 661611_u32, 1138770_u32, 997952_u32, 1309381_u32, 984769_u32,
-            1370253_u32, 1649486_u32, 1920232_u32, 1080026_u32, 1654268_u32, 1212179_u32,
-            1834060_u32, 58487_u32, 971078_u32, 424085_u32, 1175474_u32, 687490_u32, 1317807_u32,
-            713352_u32, 1985958_u32, 142307_u32, 1854880_u32, 1309882_u32, 1540711_u32, 487396_u32,
-            904606_u32, 975430_u32, 1385196_u32, 88528_u32, 1099752_u32, 372012_u32, 1708451_u32,
-            207227_u32, 1674648_u32, 1476751_u32, 1547086_u32, 138190_u32, 738504_u32, 779891_u32,
-            1107444_u32, 505099_u32, 1265858_u32, 613613_u32, 1884841_u32, 17621_u32, 1157648_u32,
-            209013_u32, 526174_u32, 971607_u32, 1004381_u32, 1202861_u32, 1494745_u32, 274131_u32,
-            982841_u32, 729228_u32, 886096_u32, 478622_u32, 1293202_u32, 539968_u32, 885395_u32,
-            152578_u32, 1647348_u32, 494562_u32, 1327036_u32, 342817_u32, 1698049_u32, 725707_u32,
-            1547591_u32, 767029_u32, 1290077_u32, 1546025_u32, 1736585_u32, 1219491_u32,
-            1852307_u32, 1555669_u32, 1883327_u32, 61829_u32, 813247_u32, 482047_u32, 1362746_u32,
-            93496_u32, 1467091_u32, 1070897_u32, 1559668_u32, 305281_u32, 690664_u32, 326883_u32,
-            444914_u32, 443937_u32, 1762042_u32, 614124_u32, 1309010_u32, 148533_u32, 1571755_u32,
-            497978_u32, 2074730_u32, 1545845_u32, 1666088_u32, 1757232_u32, 1900305_u32, 189111_u32,
-            802199_u32, 203091_u32, 881152_u32, 926582_u32, 1675352_u32, 1478644_u32, 1677015_u32,
-            20277_u32, 435117_u32, 396319_u32, 834104_u32, 370396_u32, 1445594_u32, 1161835_u32,
-            2054329_u32, 230752_u32, 644229_u32, 568858_u32, 1963813_u32, 872483_u32, 974796_u32,
-            984693_u32, 1105289_u32, 94040_u32, 1781444_u32, 278075_u32, 1901607_u32, 165376_u32,
-            834499_u32, 951353_u32, 1932215_u32, 146197_u32, 664541_u32, 383107_u32, 1743858_u32,
-            287583_u32, 1810757_u32, 570459_u32, 1739938_u32, 24296_u32, 1527677_u32, 1742586_u32,
-            2000245_u32, 392111_u32, 1596429_u32, 915955_u32, 1501951_u32, 590908_u32, 1689547_u32,
-            752882_u32, 1853220_u32, 749276_u32, 1941184_u32, 1507459_u32, 1578707_u32, 167457_u32,
-            1313516_u32, 428750_u32, 1165032_u32, 324442_u32, 368759_u32, 1283775_u32, 2017161_u32,
-            364763_u32, 2053902_u32, 905316_u32, 1800528_u32, 581102_u32, 2050600_u32, 818573_u32,
-            1762293_u32, 2711_u32, 622959_u32, 813485_u32, 831354_u32, 41471_u32, 1324329_u32,
-            862647_u32, 1007821_u32, 26246_u32, 1120632_u32, 1156719_u32, 1215948_u32, 907527_u32,
-            1144579_u32, 1042530_u32, 1287508_u32, 138588_u32, 1538967_u32, 1265927_u32,
-            1735492_u32, 229904_u32, 1039415_u32, 999131_u32, 1826370_u32, 392686_u32, 730051_u32,
-            623787_u32, 2047295_u32, 409449_u32, 1711230_u32, 462385_u32, 1992127_u32, 42656_u32,
-            880450_u32, 42729_u32, 1973289_u32, 479692_u32, 1993383_u32, 673152_u32, 1885841_u32,
-            170786_u32, 748129_u32, 521360_u32, 818751_u32, 982929_u32, 1234321_u32, 1113308_u32,
-            1907714_u32, 98953_u32, 1728051_u32, 947493_u32, 1289327_u32, 199255_u32, 1474247_u32,
-            681622_u32, 1416365_u32, 352728_u32, 1796749_u32, 603909_u32, 811763_u32, 946618_u32,
-            1104470_u32, 973691_u32, 1152770_u32, 21297_u32, 639834_u32, 594075_u32, 1017433_u32,
-            133138_u32, 630545_u32, 537386_u32, 1347734_u32, 365214_u32, 844135_u32, 1341949_u32,
-            1460424_u32, 673293_u32, 758707_u32, 754735_u32, 1456846_u32, 40018_u32, 993218_u32,
-            91092_u32, 1539083_u32, 1526483_u32, 1757364_u32, 1595990_u32, 1598593_u32, 230413_u32,
-            1897770_u32, 538469_u32, 1395634_u32, 396644_u32, 1893699_u32, 442435_u32, 571726_u32,
-            52013_u32, 1125704_u32, 1098095_u32, 2080341_u32, 200259_u32, 2046061_u32, 1241415_u32,
-            1755598_u32, 573138_u32, 735184_u32, 795832_u32, 1567959_u32, 680511_u32, 1310894_u32,
-            1103029_u32, 1516884_u32, 135655_u32, 1326571_u32, 692790_u32, 1190347_u32, 397690_u32,
-            1163996_u32, 793521_u32, 1677407_u32, 307698_u32, 1644146_u32, 476490_u32, 480901_u32,
-            939619_u32, 1485684_u32, 1154733_u32, 1255691_u32, 3690_u32, 219420_u32, 282792_u32,
-            439050_u32, 145272_u32, 576914_u32, 712049_u32, 1304645_u32, 573928_u32, 1772866_u32,
-            591113_u32, 1393852_u32, 1035141_u32, 1950385_u32, 1660238_u32, 2048950_u32, 156755_u32,
-            1608179_u32, 1548683_u32, 1672961_u32, 305784_u32, 1862688_u32, 321105_u32, 1025297_u32,
-            452008_u32, 1005531_u32, 843560_u32, 1190325_u32, 856621_u32, 1117370_u32, 1130365_u32,
-            1527816_u32, 49720_u32, 747725_u32, 88191_u32, 532153_u32, 387221_u32, 2046361_u32,
-            562281_u32, 1174973_u32, 58051_u32, 665523_u32, 1087404_u32, 1953295_u32, 288049_u32,
-            2095453_u32, 843437_u32, 1391132_u32, 71028_u32, 684791_u32, 905101_u32, 983353_u32,
-            869595_u32, 952262_u32, 1639398_u32, 1914119_u32, 419401_u32, 1543571_u32, 1072120_u32,
-            1589356_u32, 1156347_u32, 1293818_u32, 1377687_u32, 1462379_u32, 15074_u32, 1544101_u32,
-            82479_u32, 277248_u32, 608805_u32, 980975_u32, 627710_u32, 2071408_u32, 210587_u32,
-            2050837_u32, 837017_u32, 1832082_u32, 1225589_u32, 1331877_u32, 1546243_u32,
-            1710461_u32, 263463_u32, 1118404_u32, 1070140_u32, 1965733_u32, 573307_u32, 1351499_u32,
-            983779_u32, 1981322_u32, 606434_u32, 1595416_u32, 765946_u32, 1106775_u32, 909539_u32,
-            1338917_u32, 1288935_u32, 1474260_u32, 360272_u32, 448135_u32, 848529_u32, 1128620_u32,
-            425058_u32, 1408729_u32, 552440_u32, 908024_u32, 536460_u32, 1031151_u32, 1355099_u32,
-            1690286_u32, 758818_u32, 965662_u32, 1568718_u32, 1811172_u32, 394608_u32, 1421319_u32,
-            528521_u32, 983018_u32, 1098180_u32, 2033658_u32, 1555936_u32, 2016847_u32, 558752_u32,
-            1627758_u32, 1319354_u32, 1973293_u32, 844477_u32, 2092434_u32, 1252290_u32,
-            1572207_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_10_solution_00() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(10_u8);
-        let indices = array![
-            4864_u32, 1199590_u32, 193812_u32, 1249880_u32, 714671_u32, 1837456_u32, 1535571_u32,
-            1708457_u32, 232772_u32, 1454167_u32, 457525_u32, 637002_u32, 332079_u32, 1501386_u32,
-            718273_u32, 1615866_u32, 77066_u32, 484710_u32, 167020_u32, 1302858_u32, 478350_u32,
-            1147611_u32, 1080786_u32, 1765391_u32, 192941_u32, 989350_u32, 946203_u32, 2030362_u32,
-            741168_u32, 1308632_u32, 981242_u32, 1278097_u32, 37040_u32, 342963_u32, 569456_u32,
-            668433_u32, 603930_u32, 933078_u32, 698729_u32, 1622250_u32, 64884_u32, 1692110_u32,
-            592064_u32, 1876950_u32, 1033063_u32, 1611191_u32, 1595251_u32, 1620759_u32, 85174_u32,
-            1366524_u32, 780855_u32, 1565061_u32, 499859_u32, 1083320_u32, 659353_u32, 2024776_u32,
-            245240_u32, 653208_u32, 610593_u32, 1607404_u32, 692246_u32, 1235766_u32, 1256907_u32,
-            1797417_u32, 50473_u32, 131951_u32, 1598065_u32, 1624695_u32, 1111152_u32, 1515152_u32,
-            1388781_u32, 1891337_u32, 160469_u32, 432196_u32, 393547_u32, 812762_u32, 176550_u32,
-            1413868_u32, 509501_u32, 1271887_u32, 318995_u32, 1437575_u32, 991689_u32, 2006157_u32,
-            539568_u32, 1719313_u32, 794460_u32, 1908039_u32, 535401_u32, 1235620_u32, 1455510_u32,
-            1626953_u32, 1091062_u32, 1782601_u32, 1467126_u32, 1580102_u32, 170783_u32,
-            1348866_u32, 1353402_u32, 1491258_u32, 772707_u32, 1966772_u32, 826506_u32, 1152761_u32,
-            449546_u32, 1960316_u32, 1722182_u32, 2080464_u32, 585763_u32, 1674095_u32, 609247_u32,
-            843509_u32, 172788_u32, 1720636_u32, 435897_u32, 1922357_u32, 500566_u32, 1040796_u32,
-            613483_u32, 1370281_u32, 256465_u32, 1230426_u32, 769634_u32, 1233698_u32, 338802_u32,
-            1256346_u32, 1127412_u32, 1606391_u32, 28572_u32, 1971791_u32, 1444448_u32, 1918707_u32,
-            97182_u32, 1965648_u32, 257599_u32, 1202977_u32, 93470_u32, 966723_u32, 905279_u32,
-            1233897_u32, 113192_u32, 1584168_u32, 1161311_u32, 2032889_u32, 256253_u32, 1722369_u32,
-            1073588_u32, 1855590_u32, 346680_u32, 1584579_u32, 1743391_u32, 1934763_u32, 312281_u32,
-            1549608_u32, 994193_u32, 1602606_u32, 387880_u32, 725528_u32, 934703_u32, 1266574_u32,
-            65484_u32, 576232_u32, 286914_u32, 1159487_u32, 67947_u32, 120057_u32, 1292895_u32,
-            1703617_u32, 78516_u32, 561032_u32, 324727_u32, 964901_u32, 207979_u32, 1061901_u32,
-            669782_u32, 1333235_u32, 206098_u32, 1887692_u32, 556487_u32, 1825223_u32, 311381_u32,
-            1950933_u32, 346751_u32, 900814_u32, 428287_u32, 460877_u32, 839356_u32, 2060346_u32,
-            812004_u32, 1046964_u32, 1855974_u32, 2094549_u32, 104606_u32, 743195_u32, 954206_u32,
-            1215739_u32, 741600_u32, 1861587_u32, 743395_u32, 1346010_u32, 494866_u32, 1045735_u32,
-            519272_u32, 678086_u32, 1500989_u32, 1559455_u32, 1804386_u32, 1954175_u32, 125590_u32,
-            1395720_u32, 187846_u32, 573761_u32, 537850_u32, 1166248_u32, 1075068_u32, 1546494_u32,
-            227070_u32, 2020913_u32, 1609765_u32, 1905314_u32, 387408_u32, 1087195_u32, 506841_u32,
-            1499006_u32, 139388_u32, 1837001_u32, 877345_u32, 1809095_u32, 1352203_u32, 1418350_u32,
-            1850889_u32, 1990899_u32, 280451_u32, 1765615_u32, 510671_u32, 1352059_u32, 764606_u32,
-            1764448_u32, 926933_u32, 1636061_u32, 211736_u32, 1525591_u32, 655004_u32, 1579428_u32,
-            751390_u32, 1914755_u32, 1108881_u32, 1741132_u32, 312225_u32, 1280938_u32, 1278149_u32,
-            1812658_u32, 1150817_u32, 1667245_u32, 1332384_u32, 1891064_u32, 9140_u32, 1966916_u32,
-            777375_u32, 1545630_u32, 490282_u32, 1629876_u32, 1169924_u32, 1800146_u32, 343120_u32,
-            369449_u32, 1598222_u32, 1975938_u32, 1275395_u32, 1417808_u32, 1349883_u32,
-            1709635_u32, 248136_u32, 1064213_u32, 248531_u32, 419620_u32, 395583_u32, 934164_u32,
-            957401_u32, 1441780_u32, 436644_u32, 1282126_u32, 1185318_u32, 1225662_u32, 793359_u32,
-            1337722_u32, 1738888_u32, 1910757_u32, 77536_u32, 946595_u32, 193413_u32, 1714318_u32,
-            245074_u32, 944172_u32, 433226_u32, 1320914_u32, 251395_u32, 474279_u32, 837087_u32,
-            1103199_u32, 297673_u32, 606529_u32, 657996_u32, 1316189_u32, 115773_u32, 1039045_u32,
-            677050_u32, 1570537_u32, 293787_u32, 644796_u32, 1550861_u32, 1957774_u32, 601959_u32,
-            1591943_u32, 1745446_u32, 2025220_u32, 1240950_u32, 1633250_u32, 1879694_u32,
-            2058372_u32, 60446_u32, 1323729_u32, 575091_u32, 1342903_u32, 807201_u32, 1631118_u32,
-            980227_u32, 1144536_u32, 105511_u32, 2067126_u32, 618548_u32, 1233793_u32, 676117_u32,
-            1129668_u32, 1416791_u32, 1774930_u32, 106539_u32, 1150242_u32, 1145224_u32,
-            1200128_u32, 805479_u32, 1751155_u32, 995027_u32, 1982253_u32, 767482_u32, 1244117_u32,
-            944753_u32, 2047440_u32, 1095507_u32, 1299247_u32, 1460212_u32, 2038990_u32, 88843_u32,
-            530639_u32, 646346_u32, 1179485_u32, 1044312_u32, 1797756_u32, 1456669_u32, 1549970_u32,
-            496644_u32, 1959677_u32, 822589_u32, 1619867_u32, 671946_u32, 2071372_u32, 839018_u32,
-            1504389_u32, 115789_u32, 175266_u32, 1467790_u32, 1972030_u32, 1513638_u32, 1832563_u32,
-            1563718_u32, 1897413_u32, 203986_u32, 391698_u32, 1340000_u32, 1715426_u32, 1050764_u32,
-            1249824_u32, 1276431_u32, 2015035_u32, 62131_u32, 1545007_u32, 525280_u32, 717401_u32,
-            177592_u32, 661746_u32, 348866_u32, 1689238_u32, 420259_u32, 632760_u32, 1244376_u32,
-            1935559_u32, 465968_u32, 1601759_u32, 1732708_u32, 1760778_u32, 99049_u32, 302037_u32,
-            183591_u32, 822581_u32, 196077_u32, 680305_u32, 1585363_u32, 2091013_u32, 383849_u32,
-            437456_u32, 571005_u32, 1266155_u32, 611968_u32, 1457147_u32, 868500_u32, 1231186_u32,
-            147047_u32, 1237994_u32, 240469_u32, 1095717_u32, 267068_u32, 1421991_u32, 431598_u32,
-            1915282_u32, 445827_u32, 525511_u32, 1327175_u32, 1774033_u32, 716456_u32, 1233031_u32,
-            1061413_u32, 1122461_u32, 206655_u32, 572078_u32, 924087_u32, 1310789_u32, 684611_u32,
-            1287277_u32, 1773797_u32, 1913313_u32, 309030_u32, 1878386_u32, 473275_u32, 1003742_u32,
-            1260118_u32, 1576334_u32, 1318332_u32, 1864421_u32, 121871_u32, 254982_u32, 1668894_u32,
-            1981433_u32, 720578_u32, 1301056_u32, 935612_u32, 1117955_u32, 497019_u32, 1086159_u32,
-            879102_u32, 2090471_u32, 872907_u32, 1471132_u32, 1837356_u32, 1946140_u32, 132945_u32,
-            1223450_u32, 983306_u32, 1258235_u32, 211937_u32, 884317_u32, 776845_u32, 1230188_u32,
-            256819_u32, 1715032_u32, 1175550_u32, 1373727_u32, 546648_u32, 1594562_u32, 1079893_u32,
-            2013428_u32, 121905_u32, 419443_u32, 1270708_u32, 2001104_u32, 231117_u32, 1687963_u32,
-            581051_u32, 755823_u32, 150994_u32, 201680_u32, 277505_u32, 1571629_u32, 210684_u32,
-            267883_u32, 346662_u32, 1369722_u32, 210410_u32, 450237_u32, 889519_u32, 1927159_u32,
-            428761_u32, 1261947_u32, 1112506_u32, 2072336_u32, 328126_u32, 919149_u32, 422720_u32,
-            523141_u32, 480263_u32, 948885_u32, 888698_u32, 1228888_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_10_solution_01() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(10_u8);
-        let indices = array![
-            23901_u32, 617413_u32, 355244_u32, 1975506_u32, 132019_u32, 973669_u32, 1226248_u32,
-            1573681_u32, 122421_u32, 1065428_u32, 582124_u32, 909665_u32, 558651_u32, 1926639_u32,
-            991115_u32, 1811101_u32, 53484_u32, 471380_u32, 1166430_u32, 1172099_u32, 768898_u32,
-            1980136_u32, 1308533_u32, 2043797_u32, 225770_u32, 1560246_u32, 282139_u32, 1511423_u32,
-            252319_u32, 1591786_u32, 1281863_u32, 1792727_u32, 62057_u32, 1262311_u32, 152547_u32,
-            1040143_u32, 854194_u32, 1671967_u32, 1041149_u32, 1607891_u32, 65257_u32, 1134934_u32,
-            1022871_u32, 1271798_u32, 1447250_u32, 1983171_u32, 1491959_u32, 1874069_u32,
-            179856_u32, 1219906_u32, 1267725_u32, 1654491_u32, 735071_u32, 939234_u32, 766437_u32,
-            900743_u32, 430964_u32, 2070358_u32, 1146633_u32, 1654102_u32, 694284_u32, 1822630_u32,
-            762226_u32, 1448725_u32, 43801_u32, 1286582_u32, 1375355_u32, 2031392_u32, 904812_u32,
-            1027586_u32, 1334970_u32, 1596137_u32, 1178798_u32, 1845585_u32, 2024912_u32,
-            2075007_u32, 1327104_u32, 1704913_u32, 1924277_u32, 2050791_u32, 213166_u32, 509295_u32,
-            797674_u32, 1025109_u32, 844789_u32, 1735309_u32, 1228897_u32, 1966440_u32, 726212_u32,
-            789029_u32, 853855_u32, 1647548_u32, 924001_u32, 1849322_u32, 1783876_u32, 2001548_u32,
-            302290_u32, 1172889_u32, 501308_u32, 2003083_u32, 742289_u32, 1147883_u32, 808789_u32,
-            1707834_u32, 681978_u32, 1238187_u32, 1467872_u32, 1679417_u32, 854573_u32, 1431629_u32,
-            2053677_u32, 2085589_u32, 473258_u32, 1062845_u32, 1237630_u32, 1794734_u32,
-            1037815_u32, 2094316_u32, 1495253_u32, 1743060_u32, 772774_u32, 1993150_u32,
-            1098941_u32, 1165463_u32, 812798_u32, 845435_u32, 1604066_u32, 1982214_u32, 36051_u32,
-            613993_u32, 1171428_u32, 1458641_u32, 282798_u32, 328217_u32, 1168775_u32, 1871314_u32,
-            238601_u32, 1759957_u32, 1307623_u32, 1970904_u32, 281444_u32, 294479_u32, 348563_u32,
-            1135891_u32, 88431_u32, 1319495_u32, 453854_u32, 657030_u32, 343548_u32, 1764131_u32,
-            1061870_u32, 1704218_u32, 260179_u32, 345854_u32, 1307098_u32, 1823763_u32, 602183_u32,
-            1577697_u32, 1809954_u32, 2027412_u32, 51269_u32, 57467_u32, 1325003_u32, 1335582_u32,
-            1311661_u32, 1392464_u32, 1684355_u32, 2053786_u32, 534916_u32, 1468056_u32,
-            1606406_u32, 1802740_u32, 1162295_u32, 1458329_u32, 1580464_u32, 1802771_u32, 62963_u32,
-            1265622_u32, 1079825_u32, 1523318_u32, 697498_u32, 1137974_u32, 1153192_u32,
-            1248533_u32, 129604_u32, 1178809_u32, 1073871_u32, 1104755_u32, 311330_u32, 517501_u32,
-            535836_u32, 1379634_u32, 40198_u32, 647811_u32, 675812_u32, 936605_u32, 486329_u32,
-            765127_u32, 775567_u32, 1414124_u32, 613964_u32, 1577815_u32, 683996_u32, 1689517_u32,
-            996979_u32, 2083259_u32, 1556180_u32, 2058600_u32, 210016_u32, 1789429_u32, 275149_u32,
-            2088979_u32, 726542_u32, 1285888_u32, 939385_u32, 1301015_u32, 305279_u32, 339990_u32,
-            307825_u32, 523852_u32, 332361_u32, 1577829_u32, 914883_u32, 1501568_u32, 67628_u32,
-            390418_u32, 842350_u32, 1733296_u32, 1075292_u32, 1541991_u32, 1118111_u32, 1412896_u32,
-            133657_u32, 421233_u32, 334008_u32, 1150183_u32, 617485_u32, 1236606_u32, 787610_u32,
-            1451290_u32, 179174_u32, 1512540_u32, 554916_u32, 1239556_u32, 543320_u32, 623168_u32,
-            668527_u32, 836286_u32, 288147_u32, 724320_u32, 632809_u32, 1666001_u32, 989270_u32,
-            1332112_u32, 1491347_u32, 1690153_u32, 47022_u32, 628361_u32, 1666493_u32, 1972048_u32,
-            521980_u32, 1695996_u32, 1230445_u32, 1557971_u32, 107339_u32, 1669410_u32, 441113_u32,
-            1464999_u32, 675537_u32, 2082149_u32, 967630_u32, 1727034_u32, 73959_u32, 1283937_u32,
-            1221350_u32, 1586488_u32, 532533_u32, 2054356_u32, 1372304_u32, 1965748_u32, 276873_u32,
-            623244_u32, 439869_u32, 527242_u32, 532370_u32, 861699_u32, 1128671_u32, 1814005_u32,
-            81006_u32, 451273_u32, 906992_u32, 1525688_u32, 892238_u32, 1673990_u32, 1173231_u32,
-            1289145_u32, 361337_u32, 1728127_u32, 1240059_u32, 1744405_u32, 800364_u32, 1979466_u32,
-            1166409_u32, 1340859_u32, 185949_u32, 556989_u32, 600344_u32, 692557_u32, 316208_u32,
-            1531398_u32, 545306_u32, 1748454_u32, 225612_u32, 1139376_u32, 646851_u32, 1064772_u32,
-            1272849_u32, 1363216_u32, 1646428_u32, 1770462_u32, 54905_u32, 1005365_u32, 805801_u32,
-            1395824_u32, 75735_u32, 1795449_u32, 912629_u32, 1502495_u32, 188676_u32, 351070_u32,
-            828616_u32, 1590802_u32, 406154_u32, 1290478_u32, 1172204_u32, 1600863_u32, 130475_u32,
-            598371_u32, 612509_u32, 784904_u32, 489833_u32, 563167_u32, 504536_u32, 1887655_u32,
-            963575_u32, 1812104_u32, 1618265_u32, 1771485_u32, 982915_u32, 1024970_u32, 1728069_u32,
-            1928492_u32, 83664_u32, 988553_u32, 347128_u32, 1880498_u32, 212168_u32, 1305561_u32,
-            1862267_u32, 1899554_u32, 194973_u32, 1507295_u32, 940166_u32, 1752636_u32, 251583_u32,
-            2049162_u32, 692749_u32, 762955_u32, 118916_u32, 1119413_u32, 274739_u32, 470862_u32,
-            292880_u32, 414786_u32, 1218416_u32, 1709535_u32, 279622_u32, 1285940_u32, 469442_u32,
-            1987188_u32, 675485_u32, 740244_u32, 1341026_u32, 1852022_u32, 59670_u32, 1259557_u32,
-            284173_u32, 2062010_u32, 483778_u32, 1897192_u32, 1651813_u32, 1718729_u32, 388128_u32,
-            957145_u32, 1285996_u32, 1831671_u32, 497806_u32, 1832924_u32, 559068_u32, 784092_u32,
-            170059_u32, 1212079_u32, 237095_u32, 734694_u32, 767545_u32, 871328_u32, 1197522_u32,
-            1369692_u32, 221296_u32, 1792535_u32, 907705_u32, 1233817_u32, 571488_u32, 2033222_u32,
-            636603_u32, 1104823_u32, 354658_u32, 1213051_u32, 1424476_u32, 1684826_u32, 643531_u32,
-            1615184_u32, 659947_u32, 1061345_u32, 412620_u32, 605072_u32, 904987_u32, 1590212_u32,
-            1558823_u32, 1587538_u32, 1785968_u32, 2088976_u32, 452351_u32, 1338442_u32, 460036_u32,
-            616323_u32, 857148_u32, 1950194_u32, 1087766_u32, 1868668_u32, 558337_u32, 1358354_u32,
-            636084_u32, 788194_u32, 566027_u32, 675396_u32, 1825562_u32, 2095311_u32, 63285_u32,
-            1910522_u32, 709285_u32, 1519032_u32, 167798_u32, 474629_u32, 225257_u32, 1897035_u32,
-            155141_u32, 2043903_u32, 959984_u32, 1559487_u32, 698805_u32, 1800434_u32, 1062227_u32,
-            1271147_u32, 144322_u32, 1580619_u32, 1386291_u32, 1521451_u32, 852563_u32, 957301_u32,
-            1446230_u32, 1523630_u32, 364335_u32, 2071342_u32, 1235960_u32, 1310200_u32, 449297_u32,
-            601907_u32, 634608_u32, 2014188_u32, 81019_u32, 839298_u32, 474427_u32, 1831684_u32,
-            210231_u32, 1370197_u32, 1261151_u32, 1816924_u32, 329886_u32, 699000_u32, 372746_u32,
-            1891547_u32, 671945_u32, 1301809_u32, 873541_u32, 1034843_u32, 377922_u32, 680790_u32,
-            1280670_u32, 1510355_u32, 771245_u32, 1966090_u32, 1483940_u32, 2001054_u32, 426637_u32,
-            1257587_u32, 815969_u32, 1277447_u32, 631165_u32, 722596_u32, 1283260_u32, 1948358_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_200_9_block_header_nonce_11_solution_00() {
-        let n: u32 = 200_u32;
-        let k: u32 = 9_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(11_u8);
-        let indices = array![
-            4069_u32, 463738_u32, 457648_u32, 1094395_u32, 353041_u32, 845577_u32, 1338264_u32,
-            1960371_u32, 269620_u32, 856637_u32, 560213_u32, 877722_u32, 450359_u32, 826410_u32,
-            714399_u32, 1983540_u32, 126148_u32, 1080255_u32, 1138998_u32, 1761600_u32, 427345_u32,
-            1932802_u32, 881882_u32, 2068285_u32, 447232_u32, 829316_u32, 903027_u32, 1193156_u32,
-            541454_u32, 1521796_u32, 1078148_u32, 1889459_u32, 124993_u32, 1347183_u32, 581805_u32,
-            1443350_u32, 179226_u32, 1577228_u32, 651270_u32, 1325494_u32, 683884_u32, 1089322_u32,
-            793100_u32, 1463641_u32, 1237884_u32, 1941965_u32, 1796434_u32, 1863807_u32, 230979_u32,
-            828024_u32, 1428386_u32, 1491953_u32, 711293_u32, 1450044_u32, 951912_u32, 1655589_u32,
-            756010_u32, 1309938_u32, 1041860_u32, 1350970_u32, 814780_u32, 1539264_u32, 1035122_u32,
-            1455759_u32, 6420_u32, 774570_u32, 1625325_u32, 1729420_u32, 753562_u32, 1103469_u32,
-            829724_u32, 1258289_u32, 568974_u32, 756682_u32, 583406_u32, 738962_u32, 570441_u32,
-            658047_u32, 1879798_u32, 1920132_u32, 288029_u32, 716348_u32, 771535_u32, 1896895_u32,
-            750194_u32, 1355985_u32, 1833382_u32, 1937010_u32, 445480_u32, 519375_u32, 1044543_u32,
-            1447869_u32, 684723_u32, 1795442_u32, 760755_u32, 1087503_u32, 27203_u32, 401767_u32,
-            515774_u32, 2096530_u32, 220510_u32, 1531978_u32, 682810_u32, 1202695_u32, 102739_u32,
-            159328_u32, 249040_u32, 1376984_u32, 714328_u32, 1532836_u32, 1849127_u32, 1900521_u32,
-            64133_u32, 118448_u32, 1010819_u32, 1789329_u32, 1399572_u32, 1772831_u32, 1485143_u32,
-            2060346_u32, 128615_u32, 1309550_u32, 1573721_u32, 1746738_u32, 757879_u32, 1130173_u32,
-            793709_u32, 1847068_u32, 44228_u32, 228896_u32, 412976_u32, 1276115_u32, 293492_u32,
-            737005_u32, 1674045_u32, 1944525_u32, 331939_u32, 1510392_u32, 369242_u32, 1077155_u32,
-            426460_u32, 1673372_u32, 431032_u32, 1274877_u32, 60341_u32, 294808_u32, 695707_u32,
-            2027632_u32, 240042_u32, 1252879_u32, 1725057_u32, 1913005_u32, 313836_u32, 526303_u32,
-            515786_u32, 1468016_u32, 545971_u32, 1193874_u32, 875617_u32, 1497527_u32, 112951_u32,
-            733634_u32, 1406066_u32, 1866156_u32, 476895_u32, 1582936_u32, 1613761_u32, 1810957_u32,
-            555593_u32, 1637664_u32, 1205103_u32, 2010551_u32, 801136_u32, 1350946_u32, 1416652_u32,
-            1881050_u32, 251209_u32, 1831040_u32, 485897_u32, 1321291_u32, 526290_u32, 759360_u32,
-            833919_u32, 1197480_u32, 275949_u32, 437926_u32, 1352279_u32, 1907841_u32, 1174293_u32,
-            1232730_u32, 1591652_u32, 1724868_u32, 64129_u32, 638812_u32, 164647_u32, 1927780_u32,
-            226966_u32, 1708268_u32, 725951_u32, 1398329_u32, 404993_u32, 1261809_u32, 933394_u32,
-            1045040_u32, 448233_u32, 673005_u32, 481885_u32, 1180107_u32, 135281_u32, 1803975_u32,
-            1109497_u32, 1803585_u32, 532625_u32, 1135255_u32, 1119381_u32, 1966487_u32, 557305_u32,
-            2051233_u32, 615421_u32, 1411567_u32, 610639_u32, 1787653_u32, 1241629_u32, 1372160_u32,
-            127977_u32, 1274377_u32, 556987_u32, 822140_u32, 886894_u32, 1502085_u32, 1317350_u32,
-            1334492_u32, 221984_u32, 990436_u32, 1138067_u32, 1488903_u32, 525849_u32, 1181021_u32,
-            1763583_u32, 1797031_u32, 391839_u32, 736791_u32, 1471289_u32, 1549100_u32, 483303_u32,
-            750308_u32, 1537541_u32, 1566177_u32, 659853_u32, 1733147_u32, 864458_u32, 1431423_u32,
-            1528133_u32, 1779129_u32, 1945881_u32, 2012012_u32, 7510_u32, 2047486_u32, 1071115_u32,
-            1190891_u32, 209477_u32, 1579776_u32, 452538_u32, 1743654_u32, 61983_u32, 1504258_u32,
-            1687339_u32, 2091843_u32, 336350_u32, 524705_u32, 1133333_u32, 1162168_u32, 20622_u32,
-            107880_u32, 657023_u32, 1441283_u32, 352745_u32, 1959673_u32, 1253812_u32, 1948787_u32,
-            57245_u32, 2008612_u32, 128314_u32, 429920_u32, 106537_u32, 2057002_u32, 2060106_u32,
-            2090515_u32, 15120_u32, 1229368_u32, 1691769_u32, 1924728_u32, 90639_u32, 562555_u32,
-            626612_u32, 1794414_u32, 218678_u32, 1909493_u32, 980759_u32, 1591385_u32, 714695_u32,
-            1440327_u32, 1320404_u32, 1828751_u32, 84296_u32, 1186698_u32, 440022_u32, 1235700_u32,
-            576284_u32, 1694165_u32, 1568289_u32, 2002405_u32, 956662_u32, 1163003_u32, 1235075_u32,
-            1791789_u32, 1364965_u32, 1669818_u32, 1464088_u32, 1574228_u32, 47568_u32, 911259_u32,
-            975879_u32, 1880881_u32, 98599_u32, 303565_u32, 1387907_u32, 1576200_u32, 92625_u32,
-            1959308_u32, 333801_u32, 1231633_u32, 772862_u32, 1284483_u32, 1534241_u32, 2013255_u32,
-            74617_u32, 1025792_u32, 1135731_u32, 1451877_u32, 473457_u32, 1073612_u32, 1045423_u32,
-            1746842_u32, 494445_u32, 1703635_u32, 1306798_u32, 2003521_u32, 949685_u32, 1927757_u32,
-            1496880_u32, 1857562_u32, 161571_u32, 1044916_u32, 640458_u32, 1053372_u32, 719774_u32,
-            1292407_u32, 1131831_u32, 1741201_u32, 374920_u32, 1893201_u32, 915430_u32, 2028608_u32,
-            679984_u32, 1165018_u32, 1065417_u32, 2046590_u32, 464822_u32, 1353906_u32, 810126_u32,
-            1433305_u32, 882328_u32, 1630701_u32, 1519924_u32, 1596363_u32, 560399_u32, 2011590_u32,
-            1306858_u32, 1629806_u32, 1287457_u32, 1615912_u32, 1712644_u32, 1924703_u32, 7943_u32,
-            1336360_u32, 1610242_u32, 1822737_u32, 474625_u32, 2088181_u32, 491226_u32, 2067675_u32,
-            200602_u32, 1281328_u32, 1025938_u32, 1898799_u32, 697976_u32, 1208680_u32, 863807_u32,
-            1728279_u32, 235165_u32, 1134723_u32, 1062949_u32, 1834188_u32, 1078943_u32,
-            1832179_u32, 1383472_u32, 2066945_u32, 278003_u32, 1551243_u32, 328896_u32, 1274678_u32,
-            329449_u32, 894853_u32, 1807715_u32, 2007736_u32, 37987_u32, 878450_u32, 1503193_u32,
-            1885025_u32, 82368_u32, 1588984_u32, 205464_u32, 1958945_u32, 352190_u32, 581519_u32,
-            977218_u32, 1948110_u32, 605118_u32, 1616091_u32, 1170257_u32, 1979591_u32, 350625_u32,
-            935037_u32, 1171330_u32, 1579630_u32, 503298_u32, 1825558_u32, 667693_u32, 1930990_u32,
-            406035_u32, 475116_u32, 840775_u32, 1489431_u32, 669255_u32, 1365102_u32, 1615968_u32,
-            1714470_u32, 37008_u32, 1765323_u32, 694838_u32, 1838285_u32, 1254886_u32, 1713979_u32,
-            1376019_u32, 1683443_u32, 189227_u32, 2040007_u32, 212830_u32, 1846721_u32, 328541_u32,
-            675639_u32, 1117953_u32, 1173356_u32, 174554_u32, 1453766_u32, 1016781_u32, 1380416_u32,
-            284565_u32, 916510_u32, 770336_u32, 1613349_u32, 313668_u32, 622218_u32, 1284478_u32,
-            1831739_u32, 404140_u32, 728071_u32, 834045_u32, 2069311_u32, 51289_u32, 1600412_u32,
-            412477_u32, 2062451_u32, 130962_u32, 2053156_u32, 465929_u32, 709254_u32, 117855_u32,
-            1392948_u32, 136673_u32, 374064_u32, 121591_u32, 1688669_u32, 846029_u32, 994804_u32,
-            675059_u32, 1448777_u32, 1045103_u32, 1240057_u32, 816462_u32, 1499323_u32, 1890697_u32,
-            1896908_u32, 826192_u32, 959241_u32, 833980_u32, 1301853_u32, 1149691_u32, 1227108_u32,
-            1164702_u32, 1520364_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_0_solution_00() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(0_u8);
-        let indices = array![
-            592534_u32, 16727887_u32, 7453057_u32, 25925862_u32, 3112444_u32, 22940957_u32,
-            11281555_u32, 31775301_u32, 1334223_u32, 20443726_u32, 11070438_u32, 27290152_u32,
-            4163350_u32, 8213747_u32, 9315696_u32, 19739115_u32, 1204738_u32, 23545872_u32,
-            1776094_u32, 13506389_u32, 6697536_u32, 27749507_u32, 11388567_u32, 14622750_u32,
-            4026870_u32, 14622947_u32, 8538779_u32, 27133048_u32, 11652285_u32, 21221152_u32,
-            22429643_u32, 26529065_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_0_solution_01() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(0_u8);
-        let indices = array![
-            893099_u32, 8838806_u32, 28398733_u32, 31357275_u32, 16596368_u32, 25123776_u32,
-            18326148_u32, 31682454_u32, 924167_u32, 27761424_u32, 20546064_u32, 30880786_u32,
-            2931034_u32, 11343701_u32, 17011529_u32, 26876917_u32, 4915668_u32, 8097132_u32,
-            17630254_u32, 19828133_u32, 5205703_u32, 15014329_u32, 13248799_u32, 31182371_u32,
-            7887075_u32, 22909946_u32, 28758238_u32, 31473391_u32, 14791659_u32, 33348545_u32,
-            23436578_u32, 26267836_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_0_solution_02() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(0_u8);
-        let indices = array![
-            1948823_u32, 6927010_u32, 5051182_u32, 16853572_u32, 7567151_u32, 8174004_u32,
-            9697548_u32, 30082354_u32, 4126978_u32, 11219458_u32, 12046931_u32, 26296269_u32,
-            6960990_u32, 7513282_u32, 15641819_u32, 29553952_u32, 2075509_u32, 3917596_u32,
-            26506206_u32, 32423116_u32, 20172796_u32, 26046597_u32, 21008102_u32, 32605968_u32,
-            7733247_u32, 28951159_u32, 19401173_u32, 22240259_u32, 12527355_u32, 25816053_u32,
-            26924563_u32, 30167801_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_1_solution_00() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            370176_u32, 12908777_u32, 1114179_u32, 27164301_u32, 6258700_u32, 25604518_u32,
-            23849263_u32, 25098550_u32, 3874837_u32, 22260519_u32, 6421829_u32, 20746376_u32,
-            9010370_u32, 14958301_u32, 11701370_u32, 20286183_u32, 3453033_u32, 22917202_u32,
-            17399732_u32, 25201320_u32, 12365907_u32, 25599116_u32, 12861876_u32, 16581537_u32,
-            6291684_u32, 17504753_u32, 17494629_u32, 17928408_u32, 10119629_u32, 10615318_u32,
-            17868827_u32, 20213583_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_1_solution_01() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            582263_u32, 3783052_u32, 2313999_u32, 19478261_u32, 1954747_u32, 14513744_u32,
-            5696384_u32, 9983371_u32, 770696_u32, 25399708_u32, 2469656_u32, 31060031_u32,
-            1409486_u32, 25011708_u32, 6197016_u32, 24800042_u32, 4526208_u32, 20923264_u32,
-            22532911_u32, 24458988_u32, 19054856_u32, 19620962_u32, 21223763_u32, 25258694_u32,
-            5339436_u32, 15681349_u32, 11143785_u32, 21451088_u32, 8434833_u32, 30577236_u32,
-            27811311_u32, 32663733_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_1_solution_02() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            635733_u32, 25222820_u32, 21014930_u32, 29574076_u32, 1000985_u32, 5604521_u32,
-            6974734_u32, 19935829_u32, 3041402_u32, 6498908_u32, 27180330_u32, 29522758_u32,
-            3065872_u32, 28403257_u32, 5814381_u32, 33337207_u32, 1920304_u32, 16178841_u32,
-            24948948_u32, 25474220_u32, 14568607_u32, 30131615_u32, 16282584_u32, 28097350_u32,
-            6277286_u32, 20609353_u32, 13688741_u32, 20448955_u32, 8669674_u32, 28133172_u32,
-            18969419_u32, 33014245_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_1_solution_03() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            1784595_u32, 8730569_u32, 2952232_u32, 8311088_u32, 3848398_u32, 24535350_u32,
-            6741302_u32, 15864803_u32, 5653320_u32, 16018355_u32, 17835034_u32, 29486303_u32,
-            5823367_u32, 20140719_u32, 7233264_u32, 33483182_u32, 3117353_u32, 20053611_u32,
-            3338894_u32, 15846604_u32, 7165521_u32, 28162236_u32, 8412349_u32, 11018248_u32,
-            7341551_u32, 18365873_u32, 16351743_u32, 22192468_u32, 8662075_u32, 9732645_u32,
-            14238971_u32, 22027130_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_1_solution_04() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            1791926_u32, 8318711_u32, 26251202_u32, 32356717_u32, 6997365_u32, 25735638_u32,
-            21576954_u32, 30111878_u32, 3898334_u32, 19905391_u32, 5033991_u32, 16030336_u32,
-            5245813_u32, 26522082_u32, 5669465_u32, 16635645_u32, 8277609_u32, 22422842_u32,
-            13069153_u32, 29511907_u32, 20365907_u32, 23921315_u32, 24326546_u32, 32342867_u32,
-            12058103_u32, 23466254_u32, 19021516_u32, 19329156_u32, 15273796_u32, 15658582_u32,
-            15782868_u32, 30953403_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_2_solution_00() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(2_u8);
-        let indices = array![
-            631838_u32, 32379030_u32, 12115828_u32, 15370934_u32, 1071098_u32, 28542374_u32,
-            3749356_u32, 23094728_u32, 1030877_u32, 4102154_u32, 3296262_u32, 16677836_u32,
-            7373429_u32, 23553272_u32, 13706818_u32, 22718294_u32, 1600870_u32, 2009968_u32,
-            24236940_u32, 26722391_u32, 3296672_u32, 30961726_u32, 8361013_u32, 20154770_u32,
-            3094572_u32, 28709268_u32, 6668495_u32, 32281682_u32, 11480232_u32, 24080407_u32,
-            21721486_u32, 26351116_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_2_solution_01() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(2_u8);
-        let indices = array![
-            2024468_u32, 30788885_u32, 16549044_u32, 31105157_u32, 10766172_u32, 27803398_u32,
-            14188383_u32, 18350597_u32, 8340166_u32, 12112117_u32, 9771703_u32, 16475394_u32,
-            15638163_u32, 19852515_u32, 16164133_u32, 21283881_u32, 3012382_u32, 10164383_u32,
-            4371003_u32, 27267590_u32, 4579840_u32, 32997246_u32, 17142413_u32, 27563106_u32,
-            4959833_u32, 19397820_u32, 7489484_u32, 26132602_u32, 7957443_u32, 27721944_u32,
-            26669199_u32, 27861139_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_2_solution_02() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(2_u8);
-        let indices = array![
-            5378620_u32, 10759970_u32, 17807788_u32, 29226493_u32, 11529006_u32, 22674062_u32,
-            17704747_u32, 23436136_u32, 10872275_u32, 25829134_u32, 15459988_u32, 21678082_u32,
-            17603136_u32, 22657822_u32, 22774669_u32, 23569569_u32, 6492083_u32, 20372131_u32,
-            27398382_u32, 33053456_u32, 21986403_u32, 23346432_u32, 29327458_u32, 33052852_u32,
-            13637567_u32, 26765408_u32, 26834306_u32, 29589598_u32, 17363888_u32, 31088383_u32,
-            17860587_u32, 20580709_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-    #[test]
-    fn test_valid_144_5_block_header_nonce_11_solution_00() {
-        let n: u32 = 144_u32;
-        let k: u32 = 5_u32;
-        let input = input_block_header();
-        let nonce = nonce_u8(11_u8);
-        let indices = array![
-            911662_u32, 22138389_u32, 8210265_u32, 31274530_u32, 8029780_u32, 20878462_u32,
-            18256796_u32, 24246891_u32, 1935509_u32, 22500647_u32, 18385714_u32, 21573406_u32,
-            5314654_u32, 11279996_u32, 7578895_u32, 12470048_u32, 3573289_u32, 16335834_u32,
-            8230824_u32, 25830081_u32, 4414521_u32, 7228234_u32, 20359437_u32, 21115537_u32,
-            11102213_u32, 12353678_u32, 19277545_u32, 26893604_u32, 13111251_u32, 30773720_u32,
-            14408826_u32, 26047501_u32,
-        ];
-        assert_valid_indices(n, k, input, nonce, indices);
-    }
-
-
-    // ---------------------------
-    // NOTE: 200,9 and 144,5 vectors
-    // ---------------------------
-    //
-    // The 200,9 and 144,5 vectors you pasted can be wired in *exactly the same way*:
-    //
-    // - For each TestVector:
-    //     - set n and k
-    //     - build `input_block_header()` (already provided)
-    //     - build `nonce_u8(...)` with the first byte you gave,
-    //       or the explicit 32-byte nonce where needed
-    //     - build `Array<u32>` from the solution indices
-    //     - call `assert_valid_indices(n, k, input_block_header(), nonce, indices)`
-    //
-    // Example sketch for one 200,9 vector:
-    //
-    // #[test]
-    // fn test_valid_200_9_block_header_nonce_0_solution_0() {
-    //     let n: u32 = 200_u32;
-    //     let k: u32 = 9_u32;
-    //     let input = input_block_header();
-    //     let nonce = nonce_u8(0_u8); // or explicit 32-byte array if needed
-    //
-    //     let indices = array![
-    //         4313_u32, 223176_u32, 448870_u32, /* ... all the rest ... */, 1971986_u32
-    //     ];
-    //
-    //     assert_valid_indices(n, k, input, nonce, indices);
-    // }
-    //
-    // And likewise for:
-    //   - all 200,9 vectors (nonces 0,1,2,10,11)
-    //   - all 144,5 vectors (nonces 0,1,2,10,11 — note nonce 10 has no solutions)
-    //
-    // Just copy the numbers you already have into `array![ ... ]` with `_u32` suffix.
-    // ======================================================
-    // INVALID TEST VECTORS (Zcash compatibility)
-    // ======================================================
-
-    // Helper: assert invalid solution
-    fn assert_invalid_indices(
-        n: u32, k: u32, input: Array<u8>, nonce: Array<u8>, indices: Array<u32>, _msg: felt252,
-    ) {
-        let soln_bytes = minimal_from_indices(n, k, indices);
-        let ok = is_valid_solution(n, k, input, nonce, soln_bytes);
-        assert(!ok, _msg);
-    }
-
-    // ------------------------------------------------------
-    // Change one index  (error = Collision)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_change_one_index() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2262_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_collision_change1',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Swap arbitrary indices (error = Collision)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_swap_arbitrary_indices() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            45858_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 2261_u32, 116805_u32, 92842_u32,
-            111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32, 122819_u32,
-            81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32, 114474_u32,
-            104973_u32, 122568_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_collision_swap_arbitrary',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Reverse first pair (error = OutOfOrder)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_reverse_first_pair() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            15185_u32, 2261_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_outoforder_reverse_pair',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Swap first and second pairs (OutOfOrder)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_swap_pairs() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            36112_u32, 104243_u32, 2261_u32, 15185_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_outoforder_swap_pairs',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Swap last two pairs (OutOfOrder)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_swap_tail_pairs() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32,
-            104973_u32, 122568_u32, 69567_u32, 114474_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_outoforder_tail_swap',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Swap first half / second half (OutOfOrder)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_swap_halves() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32, 122819_u32, 81830_u32,
-            91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32, 114474_u32,
-            104973_u32, 122568_u32, 2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32,
-            118390_u32, 118332_u32, 130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32,
-            45858_u32, 116805_u32, 92842_u32, 111026_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_outoforder_halves',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Sorted indices (Collision)
-    //
-    // This fails collision check because adjacent nodes no longer collide.
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_sorted_indices() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2261_u32, 15185_u32, 15972_u32, 23460_u32, 23779_u32, 32642_u32, 36112_u32, 45858_u32,
-            49807_u32, 52426_u32, 68190_u32, 69567_u32, 69878_u32, 76925_u32, 80080_u32, 80391_u32,
-            81830_u32, 85191_u32, 90330_u32, 91132_u32, 92842_u32, 104243_u32, 104973_u32,
-            111026_u32, 114474_u32, 115059_u32, 116805_u32, 118332_u32, 118390_u32, 122568_u32,
-            122819_u32, 130041_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_sorted_collision',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Duplicate indices (DuplicateIdxs)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_duplicates() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2261_u32, 2261_u32, 15185_u32, 15185_u32, 36112_u32, 36112_u32, 104243_u32, 104243_u32,
-            23779_u32, 23779_u32, 118390_u32, 118390_u32, 118332_u32, 118332_u32, 130041_u32,
-            130041_u32, 32642_u32, 32642_u32, 69878_u32, 69878_u32, 76925_u32, 76925_u32, 80080_u32,
-            80080_u32, 45858_u32, 45858_u32, 116805_u32, 116805_u32, 92842_u32, 92842_u32,
-            111026_u32, 111026_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_duplicate_idxs',
-        );
-    }
-
-    // ------------------------------------------------------
-    // Duplicate entire first half (DuplicateIdxs)
-    // ------------------------------------------------------
-    #[test]
-    fn test_invalid_duplicate_first_half() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-
-        let indices = array![
-            2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32,
-            118390_u32, 118332_u32, 130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32,
-            45858_u32, 116805_u32, 92842_u32, 111026_u32,
-        ];
-
-        assert_invalid_indices(
-            n, k, input_equihash_paper(), nonce_u8(1_u8), indices, 'err_duplicate_first_half',
-        );
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_00() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            2262_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_collision_00');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_01() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            45858_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 2261_u32, 116805_u32, 92842_u32,
-            111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32, 122819_u32,
-            81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32, 114474_u32,
-            104973_u32, 122568_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_collision_01');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_02() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            15185_u32, 2261_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_outoforder_02');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_03() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            36112_u32, 104243_u32, 2261_u32, 15185_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32,
-            114474_u32, 104973_u32, 122568_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_outoforder_03');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_04() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32,
-            122819_u32, 81830_u32, 91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32,
-            104973_u32, 122568_u32, 69567_u32, 114474_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_outoforder_04');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_05() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            15972_u32, 115059_u32, 85191_u32, 90330_u32, 68190_u32, 122819_u32, 81830_u32,
-            91132_u32, 23460_u32, 49807_u32, 52426_u32, 80391_u32, 69567_u32, 114474_u32,
-            104973_u32, 122568_u32, 2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32,
-            118390_u32, 118332_u32, 130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32,
-            45858_u32, 116805_u32, 92842_u32, 111026_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_outoforder_05');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_06() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            2261_u32, 15185_u32, 15972_u32, 23460_u32, 23779_u32, 32642_u32, 36112_u32, 45858_u32,
-            49807_u32, 52426_u32, 68190_u32, 69567_u32, 69878_u32, 76925_u32, 80080_u32, 80391_u32,
-            81830_u32, 85191_u32, 90330_u32, 91132_u32, 92842_u32, 104243_u32, 104973_u32,
-            111026_u32, 114474_u32, 115059_u32, 116805_u32, 118332_u32, 118390_u32, 122568_u32,
-            122819_u32, 130041_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_collision_06');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_07() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            2261_u32, 2261_u32, 15185_u32, 15185_u32, 36112_u32, 36112_u32, 104243_u32, 104243_u32,
-            23779_u32, 23779_u32, 118390_u32, 118390_u32, 118332_u32, 118332_u32, 130041_u32,
-            130041_u32, 32642_u32, 32642_u32, 69878_u32, 69878_u32, 76925_u32, 76925_u32, 80080_u32,
-            80080_u32, 45858_u32, 45858_u32, 116805_u32, 116805_u32, 92842_u32, 92842_u32,
-            111026_u32, 111026_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_duplicateidxs_07');
-    }
-
-    #[test]
-    fn test_invalid_96_5_equihash_paper_nonce_1_case_08() {
-        let n: u32 = 96_u32;
-        let k: u32 = 5_u32;
-        let input = input_equihash_paper();
-        let nonce = nonce_u8(1_u8);
-        let indices = array![
-            2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32, 118390_u32, 118332_u32,
-            130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32, 45858_u32, 116805_u32,
-            92842_u32, 111026_u32, 2261_u32, 15185_u32, 36112_u32, 104243_u32, 23779_u32,
-            118390_u32, 118332_u32, 130041_u32, 32642_u32, 69878_u32, 76925_u32, 80080_u32,
-            45858_u32, 116805_u32, 92842_u32, 111026_u32,
-        ];
-        assert_invalid_indices(n, k, input, nonce, indices, 'err_duplicateidxs_08');
-    }
-}

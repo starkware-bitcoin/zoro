@@ -1,22 +1,31 @@
 [workspace]
-resolver = "2"
 members = [
     "crates/zoro-spv-verify",
     "crates/zoro-bridge-node",
     "crates/zoro-zcash-client",
+    "crates/zoro-assumevalid",
 ]
+resolver = "2"
 
-[patch."https://github.com/m-kus/cairo-vm"]
-cairo-vm = { git = "https://github.com/maciejka/cairo-vm", rev = "19d8a07ce9799a8af9db6f8a14a8accaad900214" }
+# [patch.crates-io]
+# cairo-lang-executable = { git = "https://github.com/m-kus/cairo", rev = "13f3701f3d6c50086beb25ee3a191949bcc8dddf" }
+# cairo-lang-runner = { git = "https://github.com/m-kus/cairo", rev = "13f3701f3d6c50086beb25ee3a191949bcc8dddf" }
+# cairo-lang-casm = { git = "https://github.com/m-kus/cairo", rev = "13f3701f3d6c50086beb25ee3a191949bcc8dddf" }
+# cairo-lang-execute-utils = { git = "https://github.com/m-kus/cairo", rev = "13f3701f3d6c50086beb25ee3a191949bcc8dddf" }
+# cairo-vm = { git = "https://github.com/m-kus/cairo-vm", rev = "c9aa51b9360a6c89389cf88c93ac30b5213e64a7" }
+# stwo-cairo-adapter = { git = "https://github.com/starkware-libs/stwo-cairo", rev = "e8bc9571675bb654b6e26a7bd53838a6ae78c344" }
 
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.36", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "zstd"] }
 async-trait = "0.1"
-
+bytes = "1.0"
 # zcash
-zebra-chain = {version = "3.1.0"}   
+zcash_primitives = { version = "0.26.1" }
+zcash_protocol = { version = "0.7.1" }
+zcash_history = { version = "0.4" }
+zebra-chain = { version = "3.1.0" }
 
 # RPC
 jsonrpsee = { version = "0.25.1", features = ["http-client", "async-client"] }
@@ -25,6 +34,17 @@ base64 = "0.21"
 # Storage
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
+
+# Stwo-cairo
+stwo = { git = "https://github.com/starkware-libs/stwo", rev = "45d0180", default-features = false }
+cairo-air = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-air", default-features = false }
+stwo-cairo-serialize = { path = "../stwo-cairo/stwo_cairo_prover/crates/cairo-serialize" }
+stwo_cairo_prover = { path = "../stwo-cairo/stwo_cairo_prover/crates/prover" }
+stwo-cairo-adapter = { path = "../stwo-cairo/stwo_cairo_prover/crates/adapter" }
+cairo-program-runner-lib = { path = "../proving-utils/crates/cairo-program-runner-lib", default-features = false }
+cairo-vm = { path = "../cairo-vm/vm", features = ["std"] }
+# Starknet
+starknet-ff = "0.3.7"
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
 dotenv = "0.15"

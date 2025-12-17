@@ -3,19 +3,39 @@ name = "zoro-bridge-node"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "zoro-bridge-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "verify_flyclient"
+path = "src/bin/verify_flyclient.rs"
+
 [dependencies]
 zoro-zcash-client = { path = "../zoro-zcash-client" }
 zoro-spv-verify = { path = "../zoro-spv-verify" }
 
 # Zcash types
 zebra-chain.workspace = true
-
+# FlyClient MMR
+accumulators = { git = "https://github.com/0xLucqs/rust-accumulators", rev = "6e2a2cf", features = [
+    "flyclient",
+    "mmr",
+    "sqlite",
+    "memory",
+] }
+zcash_history.workspace = true
+primitive-types = "0.12"
 # Async runtime
 tokio.workspace = true
 async-trait.workspace = true
 # Web framework
 axum = "0.7"
-tower-http = { version = "0.5", features = ["trace", "cors", "compression-gzip"] }
+tower-http = { version = "0.5", features = [
+    "trace",
+    "cors",
+    "compression-gzip",
+] }
 
 # Storage
 sqlx.workspace = true

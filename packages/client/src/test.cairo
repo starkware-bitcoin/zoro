@@ -13,6 +13,9 @@ struct Args {
     blocks: Array<Block>,
     /// Expected chain state (that we want to compare the result with).
     expected_chain_state: ChainState,
+    /// Sorted indices hints for each block (for O(n) Equihash uniqueness verification).
+    /// Each hint contains the same 512 indices as the block's solution, but sorted ascending.
+    sorted_indices_hints: Span<Span<u32>>,
 }
 
 /// Integration testing program entrypoint.
@@ -23,10 +26,12 @@ struct Args {
 #[executable]
 fn main(args: Args) {
     println!("Running integration test... ");
-    let Args { mut chain_state, blocks, expected_chain_state } = args;
+    let Args { mut chain_state, blocks, expected_chain_state, sorted_indices_hints } = args;
 
+    let mut hints_span = sorted_indices_hints;
     for block in blocks {
-        match validate_block_header(chain_state, block) {
+        let sorted_hint = *hints_span.pop_front().expect('missing sorted_indices_hint');
+        match validate_block_header(chain_state, block, sorted_hint) {
             Result::Ok(new_chain_state) => { chain_state = new_chain_state; },
             Result::Err(err) => {
                 println!("FAIL: error='{}'", err);
@@ -59,7 +64,9 @@ impl ArgsSerde of Serde<Args> {
         let blocks: Array<Block> = Serde::deserialize(ref serialized).expect('blocks');
         let expected_chain_state: ChainState = Serde::deserialize(ref serialized)
             .expect('expected_chain_state');
+        let sorted_indices_hints: Span<Span<u32>> = Serde::deserialize(ref serialized)
+            .expect('sorted_indices_hints');
 
-        Option::Some(Args { chain_state, blocks, expected_chain_state })
+        Option::Some(Args { chain_state, blocks, expected_chain_state, sorted_indices_hints })
     }
 }

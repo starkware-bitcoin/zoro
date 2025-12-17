@@ -70,6 +70,16 @@ pub const EQUIHASH_N: u32 = 200;
 pub const EQUIHASH_K: u32 = 9;
 pub const EQUIHASH_SOLUTION_SIZE_BYTES: usize = 1344;
 pub const EQUIHASH_SOLUTION_WORDS: usize = EQUIHASH_SOLUTION_SIZE_BYTES / 4;
+pub const EQUIHASH_INDICES_TOTAL: usize = 512;
+pub const EQUIHASH_INDICES_MAX: u32 = 2097151_u32; // 2^21 - 1
+pub const EQUIHASH_HASH_OUTPUT_LENGTH: u8 = 50;
+
+/// Equihash Blake2b personalization as two little-endian u64 words.
+/// Represents: "ZcashPoW" (8 bytes) + n=200 as LE u32 + k=9 as LE u32
+pub const EQUIHASH_PERSONALIZATION: [u64; 2] = [
+    0x576f50687361635a_u64, // "ZcashPoW" as LE u64
+    0x00000009000000c8_u64 // n=200, k=9 as LE u32s
+];
 
 // =============================================================================
 // Block timing parameters

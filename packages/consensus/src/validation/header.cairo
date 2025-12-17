@@ -15,23 +15,36 @@ use utils::hash::Digest;
 
 /// Validates block header given the [Block] and the initial [ChainState].
 /// Assumes that the block data is a Merkle root rather than a list of transactions.
-pub fn validate_block_header(state: ChainState, block: Block) -> Result<ChainState, ByteArray> {
+///
+/// # Arguments
+/// * `state` - Current chain state
+/// * `block` - Block to validate
+/// * `sorted_indices_hint` - Prover hint: Equihash indices sorted ascending (for O(n) uniqueness
+/// check)
+pub fn validate_block_header(
+    state: ChainState, block: Block, sorted_indices_hint: Span<u32>,
+) -> Result<ChainState, ByteArray> {
     let txid_root = match block.data {
         TransactionData::MerkleRoot(root) => root,
     };
 
     let median_time_past = compute_median_time_past(state.prev_timestamps);
-    validate_header(state, block, txid_root, median_time_past)
+    validate_header(state, block, txid_root, median_time_past, sorted_indices_hint)
 }
 
 /// Validates block header given the [Block], initial [ChainState], and auxiliary data (to avoid
 /// recomputing it):
 /// - Transaction (Merkle) root
 /// - MTP (median time past) of the previous block
+/// - Sorted indices hint for Equihash uniqueness verification
 ///
 /// Returns the new chain state.
 pub fn validate_header(
-    state: ChainState, block: Block, txid_root: Digest, prev_mtp: u32,
+    state: ChainState,
+    block: Block,
+    txid_root: Digest,
+    prev_mtp: u32,
+    sorted_indices_hint: Span<u32>,
 ) -> Result<ChainState, ByteArray> {
     let block_height = state.block_height + 1;
 
@@ -69,9 +82,9 @@ pub fn validate_header(
     let best_block_hash = block.header.hash(state.best_block_hash, txid_root);
     let pow_target_history = next_pow_targets(pow_history, current_target);
 
-    check_equihash_solution(@block.header, state.best_block_hash, txid_root)?;
+    check_equihash_solution(block.header, state.best_block_hash, txid_root, sorted_indices_hint)?;
     validate_proof_of_work(current_target, best_block_hash)?;
-    validate_bits(current_target, block.header.bits)?;
+    validate_bits(current_target, block.header.bits, block_height)?;
 
     let mut epoch_start_time = state.epoch_start_time;
     if block_height % LEGACY_EPOCH_INTERVAL == 0 {

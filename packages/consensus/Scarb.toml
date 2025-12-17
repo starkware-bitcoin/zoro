@@ -5,7 +5,6 @@ edition = "2024_07"
 
 [dependencies]
 utils = { path = "../utils" }
-shinigami_engine.workspace = true
 
 [dev-dependencies]
 cairo_test.workspace = true
@@ -15,5 +14,6 @@ lint = "scarb fmt"
 
 [features]
 default = []
-shinigami = []
 syscalls = ["utils/syscalls"]
+blake2b = ["utils/blake2b"]
+blake2b_mock = ["utils/blake2b_mock"]

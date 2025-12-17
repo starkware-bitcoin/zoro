@@ -96,6 +96,55 @@ def flatten_tuples(src) -> list:
     return res
 
 
+# Expected key order for assumevalid Cairo program main() function signature:
+# fn main(chain_state, blocks, sorted_indices_hints, chain_state_proof) -> Result
+ASSUMEVALID_ARGS_KEY_ORDER = ["chain_state", "blocks", "sorted_indices_hints", "chain_state_proof"]
+
+# Expected key order for client Cairo program Args struct:
+# struct Args { chain_state, blocks, expected_chain_state, sorted_indices_hints }
+CLIENT_ARGS_KEY_ORDER = ["chain_state", "blocks", "expected_chain_state", "sorted_indices_hints"]
+
+# Key renames: JSON key -> Cairo key
+KEY_RENAMES = {
+    "expected": "expected_chain_state",
+}
+
+
+def normalize_args(args: dict, key_order: list) -> dict:
+    """Normalize dict keys to match the expected Cairo function signature.
+
+    This handles both key renaming (e.g., 'expected' -> 'expected_chain_state')
+    and reordering to match the function parameter order.
+    """
+    # First, rename any keys that need it
+    normalized = {}
+    for key, value in args.items():
+        new_key = KEY_RENAMES.get(key, key)
+        normalized[new_key] = value
+
+    # Then reorder to match expected order
+    reordered = {}
+    for key in key_order:
+        if key in normalized:
+            reordered[key] = normalized[key]
+    # Include any remaining keys not in the expected order
+    for key in normalized:
+        if key not in reordered:
+            reordered[key] = normalized[key]
+    return reordered
+
+
+def detect_program_type(args: dict) -> list:
+    """Detect which Cairo program the args are for based on the keys present."""
+    if "chain_state_proof" in args:
+        return ASSUMEVALID_ARGS_KEY_ORDER
+    elif "expected" in args or "expected_chain_state" in args:
+        return CLIENT_ARGS_KEY_ORDER
+    else:
+        # Default to assumevalid order
+        return ASSUMEVALID_ARGS_KEY_ORDER
+
+
 def format_args_to_cairo_serde(input_file):
     """Reads arguments from JSON file and returns formatted result as a list of hex values.
     Output is compatible with the Scarb runner arguments format.
@@ -107,6 +156,9 @@ def format_args_to_cairo_serde(input_file):
         list: List of hex values representing the Cairo serde format
     """
     args = json.loads(Path(input_file).read_text())
+    # Detect program type and normalize keys to match Cairo function signature
+    key_order = detect_program_type(args)
+    args = normalize_args(args, key_order)
     res = flatten_tuples(serialize(args))
     return list(map(hex, res))
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-SCARB="scarb"
+SCARB="${SCARB:-scarb}"
 
 GREEN='\033[0;32m'
 RED='\033[1;31m'
@@ -14,6 +14,7 @@ test_files=()
 nocapture=0
 forceall=0
 lightonly=0
+features=""
 
 # Process arguments
 for arg in "$@"; do
@@ -23,6 +24,8 @@ for arg in "$@"; do
     lightonly=1
   elif [[ "$arg" == "--forceall" ]]; then
     forceall=1
+  elif [[ "$arg" == --features=* ]]; then
+    features="${arg#--features=}"
   else
     test_files+=("$arg")  # Add only non-flag arguments as test files
   fi
@@ -59,7 +62,11 @@ for test_file in "${test_files[@]}"; do
             arguments_file="$(dirname "$test_file")/.arguments-$(basename "$test_file")"
             python3 ../../scripts/data/format_args.py --input_file ${test_file} > $arguments_file
             # output=$($SCARB burn --arguments-file $arguments_file --output-file flamegraph.svg --open-in-browser)
-            output=$($SCARB --profile release execute --print-resource-usage --arguments-file $arguments_file)
+            if [[ -n "$features" ]]; then
+                output=$($SCARB --profile release execute --features "$features" --print-resource-usage --arguments-file $arguments_file)
+            else
+                output=$($SCARB --profile release execute --print-resource-usage --arguments-file $arguments_file)
+            fi
             # See https://github.com/software-mansion/scarb/pull/2276
             rm -rf ../../target/execute
             steps=$(echo $output | grep -o 'steps: [0-9,]*' | sed 's/steps: //')

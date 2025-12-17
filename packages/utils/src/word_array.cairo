@@ -229,6 +229,93 @@ pub impl WordArrayImpl of WordArrayTrait {
         self.input.append(r0.try_into().expect('append_bytes31/13'));
     }
 
+    /// Append exactly 21 bytes packed in a single field element.
+    /// Optimized version with hardcoded divisors - no loops or pow256 calls.
+    fn append_bytes_21(ref self: WordArray, value: felt252) {
+        let bytes: u256 = value.into();
+
+        if self.last_input_num_bytes == 0 {
+            // 21 bytes → 5 full words + 1 byte remainder
+            // Divisors: 2^136, 2^104, 2^72, 2^40, 2^8
+            let (w0, r0) = DivRem::div_rem(bytes, 0x10000000000000000000000000000000000); // 2^136
+            let (w1, r1) = DivRem::div_rem(r0, 0x100000000000000000000000000); // 2^104
+            let (w2, r2) = DivRem::div_rem(r1, 0x1000000000000000000); // 2^72
+            let (w3, r3) = DivRem::div_rem(r2, 0x10000000000); // 2^40
+            let (w4, last) = DivRem::div_rem(r3, 0x100); // 2^8
+            self.input.append(w0.try_into().unwrap());
+            self.input.append(w1.try_into().unwrap());
+            self.input.append(w2.try_into().unwrap());
+            self.input.append(w3.try_into().unwrap());
+            self.input.append(w4.try_into().unwrap());
+            self.last_input_word = last.try_into().unwrap();
+            self.last_input_num_bytes = 1;
+        } else if self.last_input_num_bytes == 1 {
+            // Have 1 byte, add 21 = 22 bytes → 5 full words + 2 bytes remainder
+            // Need 3 bytes to complete first word, then [4][4][4][4] + 2 remainder
+            // Divisors: 2^16, 2^128, 2^96, 2^64, 2^32
+            let (head, last) = DivRem::div_rem(bytes, 0x10000); // 2^16 for 2-byte remainder
+            // head is 19 bytes = 152 bits, extract first 3 bytes (24 bits)
+            let (first3, rest) = DivRem::div_rem(
+                head, 0x100000000000000000000000000000000,
+            ); // 2^128
+            let (w1, r1) = DivRem::div_rem(rest, 0x1000000000000000000000000); // 2^96
+            let (w2, r2) = DivRem::div_rem(r1, 0x10000000000000000); // 2^64
+            let (w3, w4) = DivRem::div_rem(r2, 0x100000000); // 2^32
+            // Complete first word: existing 1 byte << 24 + 3 new bytes
+            let first_word: u32 = self.last_input_word * 0x1000000 + first3.try_into().unwrap();
+            self.input.append(first_word);
+            self.input.append(w1.try_into().unwrap());
+            self.input.append(w2.try_into().unwrap());
+            self.input.append(w3.try_into().unwrap());
+            self.input.append(w4.try_into().unwrap());
+            self.last_input_word = last.try_into().unwrap();
+            self.last_input_num_bytes = 2;
+        } else if self.last_input_num_bytes == 2 {
+            // Have 2 bytes, add 21 = 23 bytes → 5 full words + 3 bytes remainder
+            // Need 2 bytes to complete first word, then [4][4][4][4] + 3 remainder
+            // Divisors: 2^24, 2^128, 2^96, 2^64, 2^32
+            let (head, last) = DivRem::div_rem(bytes, 0x1000000); // 2^24 for 3-byte remainder
+            // head is 18 bytes = 144 bits, extract first 2 bytes (16 bits)
+            let (first2, rest) = DivRem::div_rem(
+                head, 0x100000000000000000000000000000000,
+            ); // 2^128
+            let (w1, r1) = DivRem::div_rem(rest, 0x1000000000000000000000000); // 2^96
+            let (w2, r2) = DivRem::div_rem(r1, 0x10000000000000000); // 2^64
+            let (w3, w4) = DivRem::div_rem(r2, 0x100000000); // 2^32
+            // Complete first word: existing 2 bytes << 16 + 2 new bytes
+            let first_word: u32 = self.last_input_word * 0x10000 + first2.try_into().unwrap();
+            self.input.append(first_word);
+            self.input.append(w1.try_into().unwrap());
+            self.input.append(w2.try_into().unwrap());
+            self.input.append(w3.try_into().unwrap());
+            self.input.append(w4.try_into().unwrap());
+            self.last_input_word = last.try_into().unwrap();
+            self.last_input_num_bytes = 3;
+        } else {
+            // last_input_num_bytes == 3
+            // Have 3 bytes, add 21 = 24 bytes → 6 full words + 0 bytes remainder
+            // Need 1 byte to complete first word, then [4][4][4][4][4]
+            // Divisors: 2^160, 2^128, 2^96, 2^64, 2^32
+            let (first1, rest) = DivRem::div_rem(
+                bytes, 0x10000000000000000000000000000000000000000,
+            ); // 2^160
+            let (w1, r1) = DivRem::div_rem(rest, 0x100000000000000000000000000000000); // 2^128
+            let (w2, r2) = DivRem::div_rem(r1, 0x1000000000000000000000000); // 2^96
+            let (w3, r3) = DivRem::div_rem(r2, 0x10000000000000000); // 2^64
+            let (w4, w5) = DivRem::div_rem(r3, 0x100000000); // 2^32
+            // Complete first word: existing 3 bytes << 8 + 1 new byte
+            let first_word: u32 = self.last_input_word * 0x100 + first1.try_into().unwrap();
+            self.input.append(first_word);
+            self.input.append(w1.try_into().unwrap());
+            self.input.append(w2.try_into().unwrap());
+            self.input.append(w3.try_into().unwrap());
+            self.input.append(w4.try_into().unwrap());
+            self.input.append(w5.try_into().unwrap());
+            self.last_input_word = 0;
+            self.last_input_num_bytes = 0;
+        }
+    }
+
     /// Append up to 31 bytes (byte length provided), packed in a single field element.
     fn append_bytes(ref self: WordArray, value: felt252, num_bytes: u32) {
         let bytes: u256 = value.into(); // DivRem is not implemented for felt252
@@ -505,5 +592,49 @@ mod tests {
         words.append_word(0xfffefd, 3);
         words.append_bytes(0x0102, 2);
         assert_eq!("fffefd0102", words_to_hex(words.span()));
+    }
+
+    #[test]
+    fn append_bytes_21() {
+        // Test case 0: last_input_num_bytes = 0
+        // 21 bytes → 5 full words + 1 byte remainder
+        let mut words: WordArray = Default::default();
+        words.append_bytes_21(0x010203040506070809101112131415161718192021);
+        assert_eq!("010203040506070809101112131415161718192021", words_to_hex(words.span()));
+
+        // Test case 1: last_input_num_bytes = 1
+        // 1 + 21 = 22 bytes → 5 full words + 2 bytes remainder
+        let mut words: WordArray = Default::default();
+        words.append_word(0xff, 1);
+        words.append_bytes_21(0x010203040506070809101112131415161718192021);
+        assert_eq!("ff010203040506070809101112131415161718192021", words_to_hex(words.span()));
+
+        // Test case 2: last_input_num_bytes = 2
+        // 2 + 21 = 23 bytes → 5 full words + 3 bytes remainder
+        let mut words: WordArray = Default::default();
+        words.append_word(0xfffe, 2);
+        words.append_bytes_21(0x010203040506070809101112131415161718192021);
+        assert_eq!("fffe010203040506070809101112131415161718192021", words_to_hex(words.span()));
+
+        // Test case 3: last_input_num_bytes = 3
+        // 3 + 21 = 24 bytes → 6 full words + 0 bytes remainder
+        let mut words: WordArray = Default::default();
+        words.append_word(0xfffefd, 3);
+        words.append_bytes_21(0x010203040506070809101112131415161718192021);
+        assert_eq!("fffefd010203040506070809101112131415161718192021", words_to_hex(words.span()));
+
+        // Test multiple consecutive appends (simulates solution bytes pattern)
+        let mut words: WordArray = Default::default();
+        words.append_word(0xfd, 1); // Start with 1 byte (like after compact_size for 1344)
+        words.append_word(0x4005, 2); // 2 more bytes to simulate fd 40 05 prefix
+        // Now last_input_num_bytes = 3
+        words.append_bytes_21(0x010203040506070809101112131415161718192021);
+        // After first append: 3 + 21 = 24 → 6 words, remainder = 0
+        words.append_bytes_21(0x222324252627282930313233343536373839404142);
+        // After second append: 0 + 21 = 21 → 5 words, remainder = 1
+        assert_eq!(
+            "fd4005010203040506070809101112131415161718192021222324252627282930313233343536373839404142",
+            words_to_hex(words.span()),
+        );
     }
 }

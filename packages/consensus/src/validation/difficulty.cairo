@@ -12,11 +12,18 @@ use utils::bit_shifts::fast_pow;
 use utils::numeric::u256_to_u32x8;
 
 /// Checks if the given bits match the target difficulty.
-pub fn validate_bits(target: u256, bits: u32) -> Result<(), ByteArray> {
+pub fn validate_bits(target: u256, bits: u32, block_height: u32) -> Result<(), ByteArray> {
     if bits_to_target(bits)? == target {
         Result::Ok(())
     } else {
-        Result::Err(format!("Block header bits {} do not match target {}", bits, target))
+        Result::Err(
+            format!(
+                "Block header bits {} do not match target {} at block height {}",
+                bits,
+                target,
+                block_height,
+            ),
+        )
     }
 }
 
@@ -55,7 +62,11 @@ pub fn adjust_difficulty(
     let actual_timespan_u256: u256 = actual_timespan_u128.into();
     let averaging_window_timespan_u256: u256 = averaging_window_timespan_u128.into();
 
-    let mut new_target: u256 = avg_target * actual_timespan_u256 / averaging_window_timespan_u256;
+    // Match zebra/zcashd order of operations: divide first, then multiply.
+    // This matters for integer division rounding:
+    // (avg_target / expected_timespan) * actual_timespan
+    // NOT: (avg_target * actual_timespan) / expected_timespan
+    let mut new_target: u256 = (avg_target / averaging_window_timespan_u256) * actual_timespan_u256;
     if new_target > POW_LIMIT {
         new_target = POW_LIMIT;
     }
