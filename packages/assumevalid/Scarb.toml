@@ -10,7 +10,7 @@ allow-syscalls = true
 cairo_execute = "2.11.4"
 consensus = { path = "../consensus" }
 utils = { path = "../utils" }
-stwo_cairo_air = { path = "../../../stwo-cairo/stwo_cairo_verifier/crates/cairo_air", features = [
+stwo_cairo_air = { git = "https://github.com/Ztarknet/stwo-cairo", branch = "blake2b", features = [
     "qm31_opcode",
 ] }
 
