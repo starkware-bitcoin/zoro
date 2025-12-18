@@ -1,4 +1,4 @@
-//! Raito SPV verification library
+//! Zoro SPV verification library
 //!
 //! This crate provides verification routines for compressed SPV proofs, including transaction,
 //! block MMR, Cairo recursive proof, and subchain work checks.
@@ -23,7 +23,7 @@ pub use proof::{
 };
 pub use verify::{
     verify_block_inclusion, verify_chain_state, verify_full_inclusion_proof,
-    verify_full_inclusion_proof_with_options, verify_proof, verify_transaction,
-    VerificationResult, VerifierConfig, VerifyOptions,
+    verify_full_inclusion_proof_with_options, verify_proof, verify_transaction, VerificationResult,
+    VerifierConfig, VerifyOptions,
 };
 pub use work::verify_subchain_work;

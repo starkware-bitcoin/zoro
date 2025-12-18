@@ -14,7 +14,9 @@ use zebra_chain::block::Header;
 use zebra_chain::transaction::Transaction;
 use zoro_zcash_client::MerkleProof;
 
-use crate::proof::{BlockInclusionProof, BootloaderOutput, ChainState, FullInclusionProof, TaskResult};
+use crate::proof::{
+    BlockInclusionProof, BootloaderOutput, ChainState, FullInclusionProof, TaskResult,
+};
 
 /// Configuration parameters controlling verification policies
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +103,7 @@ pub async fn verify_full_inclusion_proof_with_options(
     } = proof;
 
     // === Sanity Checks ===
-    
+
     // Block must be at or before the chain state height
     if block_height > chain_state.block_height {
         anyhow::bail!(
@@ -135,7 +137,8 @@ pub async fn verify_full_inclusion_proof_with_options(
         info!("SKIPPING chain state proof verification (--skip-chain-proof)");
     } else {
         info!("Verifying chain state proof (STARK)...");
-        let verified_chain_state_hash = verify_chain_state(&chain_state, chain_state_proof, config)?;
+        let verified_chain_state_hash =
+            verify_chain_state(&chain_state, chain_state_proof, config)?;
         info!("Chain state verified: {}", verified_chain_state_hash);
     }
 

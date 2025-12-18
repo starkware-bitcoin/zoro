@@ -1,18 +1,24 @@
 # Zoro Bridge Node
 
-A Zcash block indexer that accumulates the Zcash blocks, and generates data required for running the [`assumevalid`](../../packages/assumevalid/) program.
+A Zcash block indexer + HTTP API server that:
+- builds and persists Zcash **chain state** (used by `zoro-spv-verify`), and
+- maintains the **FlyClient MMR accumulator** (ZIP-221 / `zcash_history`) for Heartwood+ blocks.
 
 ## Overview
 
-The Zoro Bridge Node serves as a data preprocessing layer for the Zcash ZK client, and as an API providing compressed SPV proofs. A compressed SPV proof is a self-sufficient transaction inclusion proof that does not require clients to store the Zcash headers locally nor keep connection to a Zcash RPC node.
+The Zoro Bridge Node serves as a data layer for Zoro’s Zcash client stack:
+
+- it **indexes** Zcash block headers from a Zcash Core RPC endpoint into a local SQLite database, and
+- it exposes an **HTTP API** for retrieving headers, chain state, and generating proofs (FlyClient block inclusion proofs + transaction inclusion proofs).
 
 ## What it does
 
-1. **Connects to Zcash Core** via RPC to fetch block headers
-2. **Accumulates block headers** using Cairo-compatible Blake2 hashing
-4. **Organizes output** into sharded JSON files for efficient access by the proving pipeline
+1. **Connects to Zcash Core** via RPC to fetch block headers and auxiliary data
+2. **Stores headers + chain state** (difficulty target history, total work, timestamps, etc.) in SQLite
+3. **Builds FlyClient MMRs** starting at Heartwood activation
+   - The FlyClient MMR **resets per epoch** at Canopy and NU5 activation heights.
 
-Zoro bridge node does not handle reorgs, instead it operates with a configurable lag (by default — 1 block).
+Zoro Bridge Node does not handle reorgs; instead it operates with a configurable lag (by default: **1 block**).
 
 ## Usage
 
@@ -25,19 +31,17 @@ cargo run --bin zoro-bridge-node -- --zcash-rpc-url https://zcash-mainnet.public
 # With authentication
 cargo run --bin zoro-bridge-node -- --zcash-rpc-url http://localhost:8332 --zcash-rpc-userpwd user:password
 
-# Custom data directory and shard size
+# Custom data directory and server bind
 cargo run --bin zoro-bridge-node -- \
   --zcash-rpc-url http://localhost:8332 \
   --db-path ./custom/app.db \
-  --roots-dir ./custom/roots \
-  --shard-size 5000
+  --rpc-host 0.0.0.0:8080
 
-# Production setup with remote node and custom RPC server host
+# Production-ish setup: custom lag + quieter logs
 cargo run --bin zoro-bridge-node -- \
   --zcash-rpc-url https://zcash-node.example.com:8332 \
   --zcash-rpc-userpwd myuser:mypassword \
-  --rpc-host 0.0.0.0:8080 \
-  --shard-size 50000 \
+  --block-lag 5 \
   --log-level warn
 ```
 
@@ -77,10 +81,11 @@ cargo run --bin zoro-bridge-node
 | `--zcash-rpc-userpwd` | - | `USERPWD` | RPC credentials in `user:password` format |
 | `--rpc-host` | `127.0.0.1:5000` | - | Host and port for the bridge node's RPC server |
 | `--db-path` | `./.data/app.db` | - | SQLite database path for app storage |
-| `--shard-size` | `10000` | - | Number of blocks per shard directory |
+| `--id` | `blocks` | - | Logical namespace used for deterministic DB keys (useful if sharing a DB) |
+| `--block-lag` | `1` | - | Indexing lag in blocks to reduce reorg risk |
 | `--log-level` | `info` | - | Logging verbosity |
 
-> **Note**: When environment variables are set (either directly or via `.env` file), you can run the bridge node without any command line arguments. This is especially convenient for deployment and development setups.
+> **Note**: `RUST_LOG` is also supported (it overrides `--log-level`) because tracing uses `EnvFilter::try_from_default_env()`.
 
 ## RPC Server and API Endpoints
 
@@ -88,17 +93,18 @@ The Zoro Bridge Node runs an HTTP RPC server that provides REST endpoints for qu
 
 ### Available Endpoints
 
-#### GET /block-inclusion-proof/:height (needs update)
+#### GET /block-inclusion-proof/:block_hash
 
-Generate an inclusion proof for a block at the specified height.
+Generate a FlyClient MMR inclusion proof for a block identified by its **block hash**.
 
 **Parameters:**
-- `height` (path parameter): The block height to generate a proof for (0-indexed)
-- `block_count` (query, optional): If provided, generate the proof against the header state at this total number of blocks
+- `block_hash` (path parameter): Block hash string as accepted by Zcash Core RPC
+- `chain_height` (query, optional): If provided, generate the proof against an MMR state capped at this chain height (must be within the same epoch and >= the epoch start height).
 
 **Response:**
 ```json
 {
+  "block_height": 903000,
   "peaks_hashes": [
     "0x5fd720d341e64d17d3b8624b17979b0d0dad4fc17d891796a3a51a99d3f41599",
     "0x693aa1ab81c6362fe339fc4c7f6d8ddb1e515701e58c5bb2fb54a193c8287fdc"
@@ -106,24 +112,27 @@ Generate an inclusion proof for a block at the specified height.
   "siblings_hashes": [
     "0xc713e33d89122b85e2f646cc518c2e6ef88b06d3b016104faa95f84f878dab66"
   ],
-  "leaf_count": 832500
+  "leaf_index": 12345,
+  "leaf_count": 14321
 }
 ```
 
 **Response Fields:**
-- `peaks_hashes`: Array of MMR peak hashes at the time of proof generation (hex-encoded strings)
-- `siblings_hashes`: Array of sibling hashes needed to reconstruct the path to the root (hex-encoded strings)
-- `leaf_count`: Total number of leaves (blocks) in the MMR the proof was generated against
+- `block_height`: Block height resolved via Zcash RPC
+- `peaks_hashes`: MMR peak hashes at the time of proof generation (hex strings)
+- `siblings_hashes`: Sibling hashes needed to reconstruct the path to the root (hex strings)
+- `leaf_index`: Leaf index **within the current epoch’s MMR**
+- `leaf_count`: Total number of leaves in the epoch MMR at the proof’s state
 
 **Status Codes:**
 - `200 OK`: Proof generated successfully
-- `500 Internal Server Error`: Failed to generate proof (e.g., invalid height)
+- `400 Bad Request`: Block is before Heartwood activation height
+- `404 Not Found`: Unknown block hash
+- `500 Internal Server Error`: Proof generation failed
 
 #### GET /head
 
-Get the current head (latest processed block height) from the MMR.
-
-Note: The service operates with a lag of at least 1 block; `/head` returns the latest processed height (0-indexed), which is typically `block_count - 1`.
+Get the current head (**latest processed block height**) from the database.
 
 **Response:**
 ```json
@@ -133,8 +142,28 @@ Note: The service operates with a lag of at least 1 block; `/head` returns the l
 **Response:** The current head height as a JSON number (0-indexed)
 
 **Status Codes:**
-- `200 OK`: Block count retrieved successfully
-- `500 Internal Server Error`: Failed to retrieve block count
+- `200 OK`: Head retrieved successfully
+- `500 Internal Server Error`: Failed to retrieve head
+
+#### GET /headers?offset=&size=
+
+Get a range of indexed Zcash block headers from the local database.
+
+**Query:**
+- `offset` (optional, default `0`): first height
+- `size` (optional, default `10`): number of headers
+
+#### GET /block-header/:block_height
+
+Get a single block header (by height) from the local database.
+
+#### GET /chain-state/:block_height
+
+Get the computed chain state at `block_height` (used by `zoro-spv-verify`).
+
+#### GET /transaction-proof/:tx_id
+
+Get a transaction inclusion proof object (transaction + merkle proof + block header + block height).
 
 ### Usage Examples
 
@@ -142,15 +171,17 @@ Note: The service operates with a lag of at least 1 block; `/head` returns the l
 # Get the current head (latest processed block height)
 curl http://localhost:5000/head
 
-# Generate a proof for block at height 100 (latest state)
-curl "http://localhost:5000/block-inclusion-proof/100"
+# Get a range of headers
+curl "http://localhost:5000/headers?offset=1000&size=10"
 
-# Generate a proof for block at height 100 for an earlier state (block_count=90)
-curl "http://localhost:5000/block-inclusion-proof/100?block_count=90"
+# Get a single header
+curl "http://localhost:5000/block-header/1000"
 
-# Get sparse roots for the latest state
-curl "http://localhost:5000/roots"
+# Generate a FlyClient MMR inclusion proof for a block hash (latest epoch state)
+curl "http://localhost:5000/block-inclusion-proof/<HEARTWOOD_PLUS_BLOCK_HASH>"
 
+# Generate a proof against a capped epoch state
+curl "http://localhost:5000/block-inclusion-proof/<BLOCK_HASH>?chain_height=<EPOCH_CHAIN_HEIGHT>"
 
 # Using a custom RPC host
 cargo run --bin zoro-bridge-node -- \
@@ -167,9 +198,17 @@ The RPC server is designed to be used by:
 1. **ZK Clients**: To obtain inclusion proofs for Zcash blocks
 2. **Monitoring Tools**: To track synchronization progress via the `/head` endpoint
 
+## Utilities
+
+### verify_flyclient
+
+There is an auxiliary binary that can be used to sanity-check FlyClient roots against Zcash Core:
+
+```bash
+cargo run --bin verify_flyclient -- --zcash-rpc-url http://localhost:8332 --num-blocks 100
+```
+
 ## Requirements
 
 - Access to a Zcash RPC node
-- Sufficient disk space (numbers are for the first 900K blocks)
-    * 300MB for the accumulator state DB
-    * 3.6GB for the sparse roots files
+- Sufficient disk space for the SQLite DB at `--db-path` (it stores headers, chain states, and FlyClient MMR data)

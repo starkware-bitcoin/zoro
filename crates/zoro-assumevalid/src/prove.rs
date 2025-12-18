@@ -1,4 +1,4 @@
-//! Proving module for raito-assumevalid
+//! Proving module for zoro-assumevalid
 //!
 //! This module provides functionality to run Cairo programs and generate STARK proofs
 //! using the stwo-cairo prover library directly.

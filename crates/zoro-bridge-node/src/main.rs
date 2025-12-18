@@ -65,7 +65,7 @@ async fn main() {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
 
-    info!("Raito bridge node is launching...");
+    info!("Zoro bridge node is launching...");
 
     // Instantiating components and wiring them together
     let shutdown = Shutdown::default();
@@ -100,11 +100,11 @@ async fn main() {
         flatten(shutdown_handle)
     ) {
         Ok(_) => {
-            info!("Raito bridge node has shut down");
+            info!("Zoro bridge node has shut down");
             std::process::exit(0);
         }
         Err(_) => {
-            error!("Raito bridge node has exited with error");
+            error!("Zoro bridge node has exited with error");
             std::process::exit(1);
         }
     }

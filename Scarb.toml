@@ -2,11 +2,11 @@
 members = ["packages/*"]
 
 [workspace.package]
-description = "Bitcoin ZK client."
+description = "Zcash ZK client."
 cairo-version = "2.12.2"
 version = "0.1.0"
 readme = "README.md"
-repository = "https://github.com/keep-starknet-strange/raito"
+repository = "https://github.com/starkware-bitcoin/zoro"
 license-file = "LICENSE"
 
 [workspace.dependencies]
