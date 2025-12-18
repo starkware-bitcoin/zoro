@@ -1,115 +1,88 @@
-# raito-assumevalid
+# `zoro-assumevalid`
 
-A Rust crate for generating assumevalid arguments for Cairo programs. This crate provides both a library interface and a command-line tool for fetching chain state and block headers from a raito-bridge-node and generating Cairo-compatible arguments.
+`zoro-assumevalid` is a **binary tool** that fetches Zcash chain data from a running `zoro-bridge-node`, runs the `assumevalid` Cairo program through the bootloader, and produces **STARK proofs** for **Zcash block headers** in batches.
 
-## Features
+This crate is **not intended to be consumed as a Rust library**. (There is some internal library code to keep the binary organized, but the supported interface is the CLI.)
 
-- **Library Interface**: Use `raito-assumevalid` as a dependency in your Rust projects
-- **CLI Tool**: Command-line interface for generating and managing assumevalid arguments
-- **Bridge Node Integration**: Fetches data from raito-bridge-node via HTTP API
-- **Cairo Serialization**: Converts data to Cairo-compatible format using raito-cairo-args
-- **Flexible Configuration**: Configurable bridge node URL
+## What it does
 
-## Installation
+- **Fetches chain state** at a starting height from `zoro-bridge-node`
+- **Fetches Zcash block headers** for a range `(start_height+1 .. start_height+block_count)`
+- **Generates Cairo runner arguments** (including Equihash indices + sorted-indices hints)
+- **Runs the Cairo executable via the bootloader** in proof mode
+- **Generates and writes a proof** to disk (`proof.json`) for each batch
+- **Resumes automatically** by scanning an output directory for prior batches
 
-Add to your `Cargo.toml`:
+## Prerequisites
 
-```toml
-[dependencies]
-raito-assumevalid = { path = "../raito-assumevalid" }
-```
+- **Rust toolchain** (see the repo’s `rust-toolchain.toml`)
+- A reachable **`zoro-bridge-node` HTTP endpoint** providing:
+  - `GET /head`
+  - `GET /chain-state/{height}`
+  - `GET /headers?offset={offset}&size={size}`
 
-## Library Usage
+## Build & run
 
-```rust
-use raito_assumevalid::{ProveClient, ProveConfig, AssumeValidParams, generate_assumevalid_args, save_cairo_args_to_file};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client configuration
-    let config = ProveConfig {
-        bridge_node_url: "https://api.raito.wtf/".to_string(),
-    };
-    
-    // Create client
-    let client = ProveClient::new(config);
-    
-    // Define parameters
-    let params = AssumeValidParams {
-        start_height: 100,
-        block_count: 10,
-        chain_height: None, // Use latest
-        chain_state_proof: None,
-    };
-    
-    // Generate assumevalid args
-    let cairo_args = generate_assumevalid_args(&client, params).await?;
-    
-    println!("Generated {} Cairo arguments", cairo_args.len());
-    
-    // Save to file
-    save_cairo_args_to_file(&cairo_args, "args.json").await?;
-    
-    Ok(())
-}
-```
-
-## CLI Usage
-
-### Generate assumevalid arguments
+### Run from source (recommended for development)
 
 ```bash
-# Generate args for blocks 100-109
-raito-assumevalid generate --start-height 100 --block-count 10
-
-# Specify output file
-raito-assumevalid generate --start-height 100 --block-count 10 --output my_args.json
-
-# Use custom bridge node
-raito-assumevalid --bridge-url http://localhost:8080 generate --start-height 100 --block-count 10
+cargo run -p zoro-assumevalid -- prove --total-blocks 100 --step-size 10
 ```
 
-### Query bridge node
+### Build a release binary
 
 ```bash
-# Get current head
-raito-assumevalid head
-
-# Get chain state for specific height
-raito-assumevalid chain-state 100
+cargo build -p zoro-assumevalid --release
+./target/release/zoro-assumevalid prove --total-blocks 100 --step-size 10
 ```
 
-## Configuration
+## CLI usage
 
-### Environment Variables
+### `prove` (iterative batch proving)
 
-- `RAITO_BRIDGE_URL`: Default bridge node URL
+Prove a total number of blocks in batches. The tool determines the **starting height automatically** by scanning the output directory for existing `batch_*_to_*` folders and continuing from the highest end height.
 
-### Command Line Options
+```bash
+# Use the default bridge URL (currently https://staging.zoro.wtf) and write into ./.proofs
+zoro-assumevalid prove --total-blocks 100 --step-size 10
 
-- `--bridge-url`: Bridge node RPC URL (default: https://api.raito.wtf/)
-- `--log-level`: Log level (trace, debug, info, warn, error)
+# Point at a local bridge node, enable debug logs, and choose an output directory
+zoro-assumevalid --bridge-url http://127.0.0.1:5000 --log-level debug \
+  prove --total-blocks 1000 --step-size 25 --output-dir .proofs
+```
 
-## API Reference
+### Overriding the Cairo executable / prover params
 
-### Core Types
+```bash
+zoro-assumevalid prove \
+  --executable crates/zoro-assumevalid/compiled/assumevalid.executable.json \
+  --prover-params-file packages/assumevalid/prover_params.json \
+  --total-blocks 100 --step-size 10
+```
 
-- `ProveConfig`: Configuration for the client
-- `ProveClient`: HTTP client for bridge node communication
-- `AssumeValidParams`: Parameters for argument generation
+### Keeping temporary files
 
-### Key Functions
+By default, each batch writes `arguments.json` and removes it after the proof succeeds. To keep it:
 
-- `generate_assumevalid_args()`: Generate assumevalid arguments (returns `Vec<String>`)
-- `save_cairo_args_to_file()`: Save Cairo arguments to JSON file
+```bash
+zoro-assumevalid prove --keep-temp-files --total-blocks 10 --step-size 1
+```
 
-## Dependencies
+### Notes on GCS flags
 
-- `raito-bridge-node`: For fetching chain state and block headers
-- `raito-cairo-args`: For Cairo-compatible serialization
-- `raito-spv-verify`: For chain state types
-- `raito-spv-mmr`: For MMR roots types
+The CLI currently accepts `--load-from-gcs`, `--save-to-gcs`, and `--gcs-bucket`, but the current implementation does **not** upload/download proofs yet (the tool still resumes by scanning the local output directory).
+
+## Output layout
+
+For each batch, the tool creates a directory:
+
+- `OUTPUT_DIR/batch_{start}_to_{start+step}/proof.json`
+
+Example:
+
+- `.proofs/batch_0_to_10/proof.json`
+- `.proofs/batch_10_to_20/proof.json`
 
 ## License
 
-This project is part of the Raito ecosystem. See the main project LICENSE for details.
+See the repo’s top-level `LICENSE`.

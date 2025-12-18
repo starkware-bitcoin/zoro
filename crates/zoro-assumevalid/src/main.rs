@@ -33,7 +33,7 @@ enum Commands {
         #[arg(long)]
         save_to_gcs: bool,
 
-        #[arg(long, default_value = "raito-proofs")]
+        #[arg(long, default_value = "zoro-proofs")]
         gcs_bucket: String,
 
         /// Total number of blocks to process

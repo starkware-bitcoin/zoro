@@ -44,7 +44,6 @@ fn epoch_name_for_height(height: u32) -> &'static str {
     }
 }
 
-
 /// Convert zebra BlockHash to [u8; 32]
 fn block_hash_to_bytes(hash: &BlockHash) -> [u8; 32] {
     hash.0
@@ -164,7 +163,9 @@ impl Indexer {
             let mmr_id = format!("flyclient_{}", epoch);
             let fc_store = SQLiteStore::new(db_path, Some(true), Some(&mmr_id))
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to open FlyClient store for {}: {e}", epoch))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to open FlyClient store for {}: {e}", epoch)
+                })?;
             let hasher = Arc::new(ZcashFlyclientHasher);
             Ok(MMR::new(Arc::new(fc_store), hasher, Some(mmr_id)))
         }
@@ -172,7 +173,7 @@ impl Indexer {
         // Determine current epoch based on next block height
         let current_epoch = epoch_name_for_height(next_block_height);
         let db_path = self.config.db_path.to_str().unwrap().to_string();
-        
+
         // Initialize FlyClient MMR for current epoch
         let flyclient_mmr = create_epoch_mmr(&db_path, current_epoch).await?;
         let leaves = flyclient_mmr.leaves_count.get().await.unwrap_or(0);
@@ -180,7 +181,7 @@ impl Indexer {
             "FlyClient MMR ({}) initialized at {:?} ({} leaves)",
             current_epoch, self.config.db_path, leaves
         );
-        
+
         // Track current epoch for detecting transitions
         let mut current_epoch_name = current_epoch.to_string();
 

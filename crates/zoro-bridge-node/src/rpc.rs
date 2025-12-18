@@ -141,11 +141,7 @@ impl AppState {
         let epoch = epoch_name_for_height(block_height);
         let mmr_id = format!("flyclient_{}", epoch);
         let hasher = ZcashFlyclientHasher;
-        MMR::new(
-            self.store.clone(),
-            Arc::new(hasher),
-            Some(mmr_id),
-        )
+        MMR::new(self.store.clone(), Arc::new(hasher), Some(mmr_id))
     }
 }
 
@@ -230,7 +226,7 @@ pub async fn generate_block_inclusion_proof(
     let epoch_start = epoch_start_height(block_height);
     let leaf_index = (block_height - epoch_start) as usize;
     let element_index = map_leaf_index_to_element_index(leaf_index);
-    
+
     // Get the epoch-specific MMR
     let flyclient_mmr = state.get_flyclient_mmr(block_height);
 
@@ -272,18 +268,18 @@ pub async fn generate_block_inclusion_proof(
 /// Get the current head (latest processed block height) from the DB
 ///
 /// # Returns
-/// * `Json<u32>` - The current block count in JSON format
-/// * `StatusCode::INTERNAL_SERVER_ERROR` - If getting block count fails
+/// * `Json<u32>` - The latest processed block height in JSON format
+/// * `StatusCode::INTERNAL_SERVER_ERROR` - If getting the latest height fails
 pub async fn get_head(State(state): State<AppState>) -> Result<Json<u32>, StatusCode> {
-    let block_count = state
+    let latest_height = state
         .store
         .get_latest_chain_state_height()
         .await
         .map_err(|e| {
-            error!("Failed to get block count: {}", e);
+            error!("Failed to get latest chain state height: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    Ok(Json(block_count - 1))
+    Ok(Json(latest_height))
 }
 
 /// Get a block header by block height

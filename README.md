@@ -45,12 +45,13 @@ Zoro is a reference to **Roronoa Zoro**, the swordsman from *One Piece*.
 
 ---
 
-## Quick Start
+## Quick Start 
 
-```bash
-make build  # build Zoro client
-make test  # run Zoro tests
-```
+This repo is one of components of the [Zoro Proving Stack](https://github.com/Ztarknet/zoro-proving-stack).
+
+In order to run the services (prover, backend) see [instructions](https://github.com/Ztarknet/zoro-proving-stack?tab=readme-ov-file#proving-zcash-blocks).
+
+For verifying a proof you will need to run the [client](./crates/zoro-spv-verify/README.md).
 
 ## Objective
 
